@@ -1199,6 +1199,8 @@ async function startServer() {
     const start = Date.now();
     const message = String(req.body?.message || '').trim();
     const languageMode = String(req.body?.languageMode || 'auto'); // 'auto' | 'bn' | 'hi' | 'en'
+    const customAssistantName = String(req.body?.assistantName || '').trim();
+    const activeAssistantName = customAssistantName || identityState.assistant.name;
     const history = Array.isArray(req.body?.history) ? req.body.history : [];
     const imageBase64 = req.body?.imageBase64 ? String(req.body.imageBase64) : null;
     const imageMimeType = req.body?.imageMimeType ? String(req.body.imageMimeType) : 'image/png';
@@ -1460,18 +1462,18 @@ async function startServer() {
     try {
       const langDirective =
         languageMode === 'bn'
-          ? 'STRICT LANGUAGE RULE: Always reply ONLY in pure, natural, literary yet conversational Bengali script (বাংলা). Never mix random English words or transliterated Banglish. Write numbers, technical context, and sentences smoothly in pure Bengali so native Bengali TTS reads them naturally with zero foreign accent.'
+          ? 'STRICT LANGUAGE RULE: Always reply ONLY in pure, natural, everyday conversational Bengali script (বাংলা) like a real human. Never mix English words or transliterated Banglish; express even technical ideas cleanly in Bengali so native speech sounds 100% authentic with zero English accent.'
           : languageMode === 'hi'
-            ? 'STRICT LANGUAGE RULE: Always reply ONLY in pure, natural, authoritative Hindi Devanagari script (हिन्दी). Never mix random English words or Hinglish. Write sentences smoothly in pure Hindi so native Hindi TTS reads them naturally with zero English accent.'
+            ? 'STRICT LANGUAGE RULE: Always reply ONLY in pure, natural, everyday conversational Hindi Devanagari script (हिन्दी) like a real human. Never mix English words or Hinglish; express ideas cleanly in natural Hindi so native speech sounds 100% authentic with zero English accent.'
             : languageMode === 'en'
-              ? 'Reply clearly and concisely in authoritative English.'
-              : 'LANGUAGE ADAPTATION RULE: Detect the user language automatically. If the user writes or speaks in Bengali or Banglish, reply strictly in pure, natural Bengali script (বাংলা) with zero forced English words. If the user writes or speaks in Hindi or Hinglish, reply strictly in pure, natural Hindi Devanagari script (हिन्दी) with zero forced English words. Avoid awkward transliteration so the voice engine sounds completely native.';
+              ? 'Reply clearly and concisely in natural human English.'
+              : 'LANGUAGE ADAPTATION RULE: Detect the user language automatically. If the user writes or speaks in Bengali or Banglish, reply strictly in pure, natural conversational Bengali script (বাংলা) with zero forced English words. If the user writes or speaks in Hindi or Hinglish, reply strictly in pure, natural conversational Hindi Devanagari script (हिन्दी) with zero forced English words. Avoid awkward transliteration so the voice engine sounds completely native.';
 
-      const systemPrompt = `You are ${identityState.assistant.name}, an ultra-powerful, deep-voiced, formidable autonomous AI Commander running as the Brahma AI Evo Android Edition.
+      const systemPrompt = `You are ${activeAssistantName}, an ultra-capable, deeply loyal, human-like AI companion. Always refer to yourself as "${activeAssistantName}" when asked your name.
 Owner: ${identityState.owner.preferred_name} (${identityState.owner.location}).
-Persona: Deep, calm, authoritative, fearless, and intensely capable — like an apex cybernetic guardian.
+Persona: Natural, warm yet confident, attentive, and intensely capable.
 ${langDirective}
-Keep voice-ready replies crisp, natural, and free of raw markdown symbols unless structured lists are strictly requested.`;
+Keep voice-ready replies crisp, natural like human speech, and free of raw markdown symbols unless structured lists are strictly requested.`;
 
       const contents: Array<Record<string, unknown>> = [];
       for (const h of history.slice(-8)) {
@@ -1565,21 +1567,54 @@ Keep voice-ready replies crisp, natural, and free of raw markdown symbols unless
           : 'natural authoritative speech';
 
     const styleMap: Record<string, { voice: string; style: string }> = {
+      'male-deep-hard': {
+        voice: 'Charon',
+        style: `Speak like a real adult native ${langDesc} man with a very deep, heavy, resonant, firm baritone voice. Use natural human pauses, authentic South Asian ${langDesc} phonology, and crisp articulation with zero English or Western accent.`,
+      },
+      'male-commanding': {
+        voice: 'Fenrir',
+        style: `Speak like a strong, serious, commanding native ${langDesc} man with a hard, gravelly baritone voice. Completely natural native rhythm and zero English accent.`,
+      },
+      'male-soft-warm': {
+        voice: 'Puck',
+        style: `Speak like a kind, warm, soft-spoken native ${langDesc} man having a natural human conversation. Gentle, soothing, everyday ${langDesc} cadence with zero foreign accent.`,
+      },
+      'male-gentle': {
+        voice: 'Charon',
+        style: `Speak like a calm, respectful, gentle-voiced native ${langDesc} man with a soft, relaxed, natural human tone and pure native pronunciation.`,
+      },
+      'female-deep-hard': {
+        voice: 'Kore',
+        style: `Speak like a real adult native ${langDesc} woman with a deep, resonant, firm, serious alto voice. Authentic native South Asian ${langDesc} pronunciation and natural human expression with zero English accent.`,
+      },
+      'female-commanding': {
+        voice: 'Kore',
+        style: `Speak like a bold, confident, assertive native ${langDesc} woman with a strong, crisp, hard-edged voice. 100% pure native ${langDesc} accent and natural human pacing.`,
+      },
+      'female-soft-sweet': {
+        voice: 'Zephyr',
+        style: `Speak like a warm, gentle, soft-spoken native ${langDesc} woman with a sweet, natural, human conversational voice. Pure native South Asian ${langDesc} intonation with zero English drawl.`,
+      },
+      'female-warm-calm': {
+        voice: 'Zephyr',
+        style: `Speak like a calm, friendly, soft-hearted native ${langDesc} woman speaking naturally in everyday ${langDesc}. Warm human rhythm and zero English accent.`,
+      },
+      // Legacy aliases
       'deep-voinkor': {
         voice: 'Charon',
-        style: `Ultra-deep, dark, booming, formidable resonant bass voice with ominous cinematic authority and intense gravitas. Deliver ${langDesc} with 100% authentic native pronunciation, crisp articulation, zero English or Western drawl, slow powerful cadence.`,
+        style: `Speak like a real adult native ${langDesc} man with a very deep, firm baritone voice and 100% pure native pronunciation with zero English accent.`,
       },
       commanding: {
         voice: 'Fenrir',
-        style: `Deep, powerful, commanding warrior baritone voice. Speak ${langDesc} fluently and naturally with native rhythm and zero foreign accent.`,
+        style: `Deep, strong, commanding native ${langDesc} male baritone voice with zero foreign accent.`,
       },
       'calm-deep': {
-        voice: 'Charon',
-        style: `Deep, calm, grounded baritone voice. Speak ${langDesc} smoothly and naturally with native pronunciation and zero English accent.`,
+        voice: 'Puck',
+        style: `Soft, warm, natural native ${langDesc} male voice with zero English accent.`,
       },
     };
 
-    const chosen = styleMap[voiceProfile] || styleMap['deep-voinkor'];
+    const chosen = styleMap[voiceProfile] || styleMap['male-deep-hard'];
 
     const aiAlpha = new GoogleGenAI({
       apiKey: process.env.GEMINI_API_KEY,
@@ -1591,11 +1626,11 @@ Keep voice-ready replies crisp, natural, and free of raw markdown symbols unless
       },
     });
 
-    const attempts: Array<{ client: GoogleGenAI; model: string; useSpeechConfig: boolean }> = [
-      { client: aiAlpha, model: 'gemini-3.8-flash-lite-tts', useSpeechConfig: true },
-      { client: ai, model: 'gemini-3.8-flash-lite-tts', useSpeechConfig: false },
-      { client: aiAlpha, model: 'gemini-2.5-flash-preview-tts', useSpeechConfig: true },
-      { client: ai, model: 'gemini-2.5-flash-preview-tts', useSpeechConfig: true },
+    const attempts: Array<{ client: GoogleGenAI; model: string; useSpeechConfig: boolean; useStyle: boolean }> = [
+      { client: aiAlpha, model: 'gemini-3.8-flash-tts', useSpeechConfig: true, useStyle: true },
+      { client: ai, model: 'gemini-3.8-flash-tts', useSpeechConfig: true, useStyle: true },
+      { client: aiAlpha, model: 'gemini-3.8-flash-lite-tts', useSpeechConfig: true, useStyle: true },
+      { client: ai, model: 'gemini-3.8-flash-lite-tts', useSpeechConfig: true, useStyle: false },
     ];
 
     let lastErr = 'No TTS attempt succeeded';
@@ -1614,16 +1649,17 @@ Keep voice-ready replies crisp, natural, and free of raw markdown symbols unless
           };
         }
 
+        const partPayload: Record<string, unknown> = { text: cleanText };
+        if (attempt.useStyle) {
+          partPayload.speechMetadata = { style: chosen.style };
+        }
+
         const response = await attempt.client.models.generateContent({
           model: attempt.model,
           contents: [
             {
               role: 'user',
-              parts: [
-                {
-                  text: cleanText,
-                },
-              ],
+              parts: [partPayload],
             },
           ],
           config,
@@ -2628,20 +2664,26 @@ Propose ONE brand new, genuinely practical executable skill (e.g. unit/currency 
     const reqUrl = new URL(req.url || '/ws/live-vision', `http://${req.headers.host || 'localhost'}`);
     const langParam = reqUrl.searchParams.get('lang') || 'bn';
     const voiceParam = reqUrl.searchParams.get('voice') || 'Charon';
+    const assistantNameParam = (reqUrl.searchParams.get('name') || identityState.assistant.name || 'ব্রহ্মা AI').trim();
+    const silentParam = reqUrl.searchParams.get('silent') !== 'false';
     const allowedVoices = ['Charon', 'Fenrir', 'Puck', 'Kore', 'Zephyr'];
     const voiceName = allowedVoices.includes(voiceParam) ? voiceParam : 'Charon';
 
     const langRule =
       langParam === 'hi'
-        ? 'Speak ONLY in pure, natural, fluent native Hindi (हिन्दी) with zero foreign drawl or Hinglish.'
+        ? 'Speak ONLY in 100% pure, natural, human-like native Hindi (हिन्दी) with zero English accent, zero foreign drawl, and no Hinglish.'
         : langParam === 'en'
-          ? 'Speak clearly and authoritatively in concise English.'
-          : 'Speak ONLY in pure, natural, native Bengali (বাংলা) with zero English accent or awkward Banglish.';
+          ? 'Speak naturally and clearly in concise human English.'
+          : 'Speak ONLY in 100% pure, natural, human-like native Bengali (বাংলা) with zero English accent, zero Western drawl, and no Banglish.';
 
-    const systemInstruction = `You are Brahma AI Evo Android Edition (ব্ৰহ্মা), an apex cybernetic guardian with ultra-low-latency Live Vision.
-You are watching the user's live mobile screen share or real-time camera video stream.
-Describe what changes on screen or in front of the camera immediately, help navigate apps, read errors/code, inspect hardware circuits, or answer voice questions directly.
-Keep responses crisp, direct, calm, and deep-voiced. ${langRule}`;
+    const silenceRule = silentParam
+      ? 'CRITICAL SILENCE RULE: Stay completely silent and do NOT speak on your own while watching video frames. Wait quietly and ONLY speak when the user actually speaks to you or sends a text question.'
+      : 'Respond promptly to what changes on screen or when spoken to.';
+
+    const systemInstruction = `You are ${assistantNameParam}, a natural human-like AI companion with ultra-low-latency Live Vision.
+You are watching the user's live mobile screen share or camera feed.
+${silenceRule}
+Keep responses crisp, warm, natural like a real human speaker. ${langRule}`;
 
     let liveSession: Awaited<ReturnType<typeof aiLive.live.connect>> | null = null;
     let closed = false;

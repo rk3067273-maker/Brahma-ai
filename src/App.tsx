@@ -39,7 +39,9 @@ import { SettingsModal } from './components/SettingsModal';
 import {
   brahmaFetch,
   getBrahmaNative,
+  getVoiceOption,
   loadBrahmaSettings,
+  saveBrahmaSettings,
   type BrahmaSettings,
 } from './lib/brahmaClient';
 
@@ -60,9 +62,15 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<BrahmaTab>('command');
   const [orbState, setOrbState] = useState<OrbState>('ONLINE');
   const [languageMode, setLanguageMode] = useState<LanguageMode>('bn');
-  const [voiceProfile, setVoiceProfile] = useState<VoiceProfile>('deep-voinkor');
-  const [continuousListening, setContinuousListening] = useState<boolean>(true);
+  const [appSettings, setAppSettings] = useState<BrahmaSettings>(() => loadBrahmaSettings());
+  const [voiceProfile, setVoiceProfile] = useState<VoiceProfile>(() => loadBrahmaSettings().voiceProfile);
+  const [continuousListening, setContinuousListening] = useState<boolean>(false);
   const [autoSpeakReply, setAutoSpeakReply] = useState<boolean>(true);
+
+  const handleVoiceProfileChange = useCallback((vp: VoiceProfile) => {
+    setVoiceProfile(vp);
+    setAppSettings(saveBrahmaSettings({ voiceProfile: vp }));
+  }, []);
 
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isThinking, setIsThinking] = useState(false);
@@ -73,7 +81,6 @@ export default function App() {
   const [popupVisible, setPopupVisible] = useState<boolean>(false);
   const [settingsOpen, setSettingsOpen] = useState<boolean>(false);
   const [settingsInitialTab, setSettingsInitialTab] = useState<'api' | 'permissions' | 'notch'>('api');
-  const [appSettings, setAppSettings] = useState<BrahmaSettings>(() => loadBrahmaSettings());
   const [forcedNotchMood, setForcedNotchMood] = useState<{ mood: NotchMood; ts: number } | null>(null);
   const [terminalState, setTerminalState] = useState<TerminalState>({
     running: false,
@@ -192,7 +199,9 @@ export default function App() {
       onLevel?: (lvl: number) => void
     ) => {
       const langTag = languageMode === 'hi' ? 'hi-IN' : languageMode === 'en' ? 'en-US' : 'bn-IN';
-      const pitch = voiceProfile === 'deep-voinkor' ? 0.68 : voiceProfile === 'commanding' ? 0.78 : 0.85;
+      const voiceOpt = getVoiceOption(voiceProfile);
+      const pitch = voiceOpt.nativePitch;
+      const rate = voiceOpt.nativeRate;
       const native = getBrahmaNative();
 
       setOrbState('SPEAKING');
@@ -203,7 +212,7 @@ export default function App() {
         onLevel?.(lvl);
       }, 80);
 
-      if (native?.speakDeepVoice?.(clean, langTag, pitch, 0.94)) {
+      if (native?.speakDeepVoice?.(clean, langTag, pitch, rate)) {
         const estMs = Math.min(9000, Math.max(1800, clean.length * 68));
         await new Promise((r) => window.setTimeout(r, estMs));
         window.clearInterval(levelIntervalRef.current);
@@ -219,7 +228,22 @@ export default function App() {
           const u = new SpeechSynthesisUtterance(clean);
           u.lang = langTag;
           u.pitch = pitch;
-          u.rate = 0.94;
+          u.rate = rate;
+          const voices = window.speechSynthesis.getVoices();
+          const langPrefix = langTag.split('-')[0].toLowerCase();
+          const matchingLangVoices = voices.filter((v) =>
+            v.lang.toLowerCase().startsWith(langPrefix)
+          );
+          if (matchingLangVoices.length > 0) {
+            const wantFemale = voiceOpt.gender === 'female';
+            const gendered = matchingLangVoices.find((v) => {
+              const n = v.name.toLowerCase();
+              return wantFemale
+                ? /female|woman|girl|lekha|kalpana|heera|swara|tanvi|aditi|raveena|priya|ananya/.test(n)
+                : /male|man|prabhat|madhur|hemant|rishi|bashkar|neel|arjun/.test(n);
+            });
+            u.voice = gendered || matchingLangVoices[0];
+          }
           u.onend = () => resolve();
           u.onerror = () => resolve();
           window.speechSynthesis.speak(u);
@@ -332,6 +356,7 @@ export default function App() {
           body: JSON.stringify({
             message: text,
             languageMode,
+            assistantName: appSettings.assistantName,
             imageBase64,
             imageMimeType,
             history: messages.slice(-8).map((m) => ({ role: m.role, text: m.text })),
@@ -403,7 +428,7 @@ export default function App() {
         setIsThinking(false);
       }
     },
-    [autoSpeakReply, languageMode, messages, refreshBriefing, refreshTerminalState, speakDeepVoice]
+    [appSettings.assistantName, autoSpeakReply, languageMode, messages, refreshBriefing, refreshTerminalState, speakDeepVoice]
   );
 
   return (
@@ -416,9 +441,15 @@ export default function App() {
         popupVisible={popupVisible}
         expressionsEnabled={appSettings.notchExpressions}
         dizzyEnabled={appSettings.dizzyReaction}
+        silentUntilUserSpeaks={appSettings.silentUntilUserSpeaks}
+        scale={appSettings.notchScale}
+        position={appSettings.notchPosition}
+        onPositionChange={(pos) => setAppSettings(saveBrahmaSettings({ notchPosition: pos }))}
         forcedMood={forcedNotchMood}
         onDizzyTriggered={(phrase) => {
-          void speakDeepVoice(phrase);
+          if (!appSettings.silentUntilUserSpeaks) {
+            void speakDeepVoice(phrase);
+          }
         }}
         onTogglePopup={() => {
           setPopupVisible((v) => !v);
@@ -434,12 +465,12 @@ export default function App() {
         <div className="flex items-center gap-2 shrink-0">
           <img
             src="/brahma-assets/brahma_evo_logo.png"
-            alt="Brahma AI Evo"
+            alt={appSettings.assistantName || 'Brahma AI'}
             className="w-8 h-8 rounded-lg object-contain border border-cyan-500/30 bg-[#0d0f14] p-0.5"
           />
           <div>
             <div className="text-xs sm:text-sm font-extrabold tracking-widest uppercase text-white leading-none">
-              BRAHMA <span className="text-cyan-400">EVO</span>
+              {appSettings.assistantName || 'ব্রহ্মা AI'}
             </div>
             <div className="text-[9px] text-emerald-400 tracking-wider uppercase mt-0.5 font-semibold">
               Android Edition
@@ -507,6 +538,7 @@ export default function App() {
       <main className="flex-1 min-h-0 relative">
         {activeTab === 'command' && (
           <NeuralCommandCenter
+            assistantName={appSettings.assistantName}
             orbState={orbState}
             setOrbState={setOrbState}
             messages={messages}
@@ -526,12 +558,14 @@ export default function App() {
 
         {activeTab === 'voice' && (
           <LiveVoiceStudio
+            assistantName={appSettings.assistantName}
             languageMode={languageMode}
             setLanguageMode={setLanguageMode}
             voiceProfile={voiceProfile}
-            setVoiceProfile={setVoiceProfile}
+            setVoiceProfile={handleVoiceProfileChange}
             continuousListening={continuousListening}
             setContinuousListening={setContinuousListening}
+            silentUntilUserSpeaks={appSettings.silentUntilUserSpeaks}
             onSendMessage={(txt) => handleSendMessage(txt, undefined, undefined, true)}
             onSpeakDeepVoice={speakDeepVoice}
             onStopSpeaking={stopSpeaking}
@@ -540,7 +574,12 @@ export default function App() {
         )}
 
         {activeTab === 'vision' && (
-          <LiveVisionPanel languageMode={languageMode} voiceProfile={voiceProfile} />
+          <LiveVisionPanel
+            assistantName={appSettings.assistantName}
+            languageMode={languageMode}
+            voiceProfile={voiceProfile}
+            silentUntilUserSpeaks={appSettings.silentUntilUserSpeaks}
+          />
         )}
 
         {activeTab === 'terminal' && (
@@ -577,7 +616,13 @@ export default function App() {
 
         {activeTab === 'smart-office' && <SmartHomeAndOfficePanel />}
 
-        {activeTab === 'remote' && <RemoteAndIdentityPanel />}
+        {activeTab === 'remote' && (
+          <RemoteAndIdentityPanel
+            onAssistantNameChanged={(name) =>
+              setAppSettings(saveBrahmaSettings({ assistantName: name }))
+            }
+          />
+        )}
       </main>
 
       {/* Android Mobile Bottom Navigation Bar */}
@@ -617,10 +662,13 @@ export default function App() {
         open={settingsOpen}
         initialTab={settingsInitialTab}
         onClose={() => setSettingsOpen(false)}
-        onSettingsChanged={(next) => setAppSettings(next)}
+        onSettingsChanged={(next) => {
+          setAppSettings(next);
+          setVoiceProfile(next.voiceProfile);
+        }}
         onTriggerMood={(mood, speakDizzy) => {
           setForcedNotchMood({ mood, ts: Date.now() });
-          if (speakDizzy) {
+          if (speakDizzy && !appSettings.silentUntilUserSpeaks) {
             void speakDeepVoice('উফফ! আমার মাথা ঘুরছে! এতো জোরে আঙুল ঘোরাবেন না!');
           }
         }}

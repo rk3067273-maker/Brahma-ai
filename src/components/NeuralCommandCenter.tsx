@@ -17,6 +17,7 @@ import {
 import type { BriefingData, BrahmaTab, ChatMessage, LanguageMode, OrbState } from '../types/brahma';
 
 interface NeuralCommandCenterProps {
+  assistantName?: string;
   orbState: OrbState;
   setOrbState: (state: OrbState) => void;
   messages: ChatMessage[];
@@ -39,6 +40,7 @@ const QUICK_PROMPTS = [
 ];
 
 export const NeuralCommandCenter: React.FC<NeuralCommandCenterProps> = ({
+  assistantName = 'ব্রহ্মা AI',
   orbState,
   setOrbState,
   messages,
@@ -242,7 +244,7 @@ export const NeuralCommandCenter: React.FC<NeuralCommandCenterProps> = ({
                 <div className="flex justify-start">
                   <div className="bg-[#07080b]/85 backdrop-blur-xl border border-cyan-500/30 rounded-2xl px-4 py-2 text-xs text-cyan-300 flex items-center gap-2">
                     <span className="w-2 h-2 rounded-full bg-cyan-400 animate-ping" />
-                    ব্রহ্মা নিউরাল কোর উত্তর প্রস্তুত করছে...
+                    {assistantName} নিউরাল কোর উত্তর প্রস্তুত করছে...
                   </div>
                 </div>
               )}
@@ -344,7 +346,7 @@ export const NeuralCommandCenter: React.FC<NeuralCommandCenterProps> = ({
               type="text"
               value={input}
               onChange={(e) => setInput(e.target.value)}
-              placeholder="ব্রহ্মাকে নির্দেশ দিন (বাংলা / हिन्दी / English)..."
+              placeholder={`${assistantName}-কে নির্দেশ দিন (বাংলা / हिन्दी / English)...`}
               className="flex-1 bg-transparent text-xs sm:text-sm text-white placeholder-slate-400 focus:outline-none px-1.5"
             />
 

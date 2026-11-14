@@ -23,8 +23,13 @@ import {
   Frown,
   Flame,
   RotateCw,
+  UserCheck,
+  Maximize2,
+  MapPinOff,
+  VolumeX,
 } from 'lucide-react';
 import {
+  brahmaFetch,
   getBrahmaNative,
   getPermissionStatuses,
   loadBrahmaSettings,
@@ -93,11 +98,35 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
   const updateField = <K extends keyof BrahmaSettings>(k: K, val: BrahmaSettings[K]) => {
     setSettings((prev) => {
-      const next = { ...prev, [k]: val };
-      saveBrahmaSettings(next);
+      const next = saveBrahmaSettings({ ...prev, [k]: val });
       onSettingsChanged(next);
+      if (k === 'notchScale' && typeof val === 'number') {
+        getBrahmaNative()?.updateOverlayScale?.(val);
+      }
       return next;
     });
+  };
+
+  const handleSaveAssistantName = async () => {
+    const cleanName = settings.assistantName.trim() || 'ব্রহ্মা AI';
+    updateField('assistantName', cleanName);
+    try {
+      await brahmaFetch('/api/identity', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          assistant: {
+            name: cleanName,
+            application_name: cleanName,
+            title: 'Android Companion',
+          },
+        }),
+      });
+    } catch {
+      // local storage already saved
+    }
+    setSavedNotice(`অ্যাসিস্ট্যান্টের নতুন নাম "${cleanName}" সেভ করা হয়েছে।`);
+    window.setTimeout(() => setSavedNotice(null), 2600);
   };
 
   const handleSaveAndVerifyKey = async () => {
@@ -107,6 +136,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     setKeyStatus(null);
     try {
       const res = await verifyGeminiApiKey(settings.geminiApiKey);
+      if (res.ok) {
+        const refreshed = loadBrahmaSettings();
+        setSettings(refreshed);
+        onSettingsChanged(refreshed);
+      }
       setKeyStatus({ ok: res.ok, msg: res.message });
     } finally {
       setVerifyingKey(false);
@@ -295,24 +329,56 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             </div>
           )}
 
-          {/* TAB 1: API KEYS & SERVER */}
+          {/* TAB 1: API KEYS, NAME & SERVER */}
           {subTab === 'api' && (
             <div className="space-y-4">
+              {/* Custom Assistant Name Card */}
+              <div className="p-4 rounded-2xl bg-[#0d111a] border border-amber-500/30 space-y-3">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2 text-xs font-bold text-white uppercase tracking-wider">
+                    <UserCheck className="w-4 h-4 text-amber-400" />
+                    <span>অ্যাসিস্ট্যান্টের নাম পরিবর্তন (Custom Name)</span>
+                  </div>
+                  <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-300 border border-amber-400/30">
+                    {settings.assistantName}
+                  </span>
+                </div>
+                <p className="text-xs text-slate-400">
+                  আপনি নিজের পছন্দমতো ওর নাম রাখতে পারেন (যেমন: ব্রহ্মা, জার্ভিস, মিত্রা, আর্য বা যেকোনো নাম)।
+                </p>
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    value={settings.assistantName}
+                    onChange={(e) => updateField('assistantName', e.target.value)}
+                    placeholder="যেমন: ব্রহ্মা AI / আর্য / মিত্রা"
+                    className="flex-1 bg-[#06080c] border border-white/15 focus:border-amber-400 rounded-xl px-3.5 py-2.5 text-xs text-white focus:outline-none"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => void handleSaveAssistantName()}
+                    className="px-4 py-2.5 rounded-xl bg-amber-400 hover:bg-amber-300 text-[#020305] font-bold text-xs whitespace-nowrap cursor-pointer"
+                  >
+                    নাম সেভ করুন
+                  </button>
+                </div>
+              </div>
+
               {/* Gemini API Key Card */}
               <div className="p-4 rounded-2xl bg-[#0d111a] border border-cyan-500/30 space-y-3">
                 <div className="flex items-center justify-between gap-2">
                   <div className="flex items-center gap-2 text-xs font-bold text-white uppercase tracking-wider">
                     <KeyRound className="w-4 h-4 text-cyan-400" />
-                    <span>Gemini API Key (কথা, ভিশন ও অটোমেশন)</span>
+                    <span>Gemini API Key (Latest Gemini 4 & 3.8 API)</span>
                   </div>
                   {settings.geminiApiKey.trim() && (
-                    <span className="text-[10px] px-2 py-0.5 rounded-full bg-cyan-500/15 text-cyan-300 border border-cyan-400/30">
-                      Saved
+                    <span className="text-[10px] px-2 py-0.5 rounded-full bg-cyan-500/15 text-cyan-300 border border-cyan-400/30 font-mono">
+                      {settings.verifiedModel || 'gemini-4-hydrogen'}
                     </span>
                   )}
                 </div>
                 <p className="text-xs text-slate-400 leading-relaxed">
-                  Android APK ফোনে সরাসরি অফলাইন-টু-ক্লাউড ব্রহ্মার সাথে কথা বলতে এবং সব ফিচার চালাতে আপনার Gemini API Key এখানে দিয়ে <strong>Verify</strong> করুন (শুধু আপনার ফোনেই সেভ থাকবে)।
+                  Android APK-তে সরাসরি লেটেস্ট Google Gemini API (Gemini 4 Hydrogen, Gemini 3.8 Neural Voice ও Live Vision) চালাতে আপনার API Key দিয়ে <strong>Save & Verify</strong> করুন।
                 </p>
 
                 <div className="flex gap-2">
@@ -521,13 +587,93 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             </div>
           )}
 
-          {/* TAB 3: DYNAMIC NOTCH, MOODS & AUTOMATION */}
+          {/* TAB 3: DYNAMIC NOTCH, SIZE, SILENCE & MOODS */}
           {subTab === 'notch' && (
             <div className="space-y-4">
+              {/* Movable Cursor / Notch Size & Position Controls */}
+              <div className="p-4 rounded-2xl bg-[#0d111a] border border-cyan-500/30 space-y-3">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-white">
+                    <Maximize2 className="w-4 h-4 text-cyan-400" />
+                    <span>কার্সার / ডাইনামিক নচ সাইজ ও পজিশন</span>
+                  </div>
+                  <span className="text-xs font-mono text-cyan-300 font-bold">
+                    {Math.round(settings.notchScale * 100)}%
+                  </span>
+                </div>
+                <p className="text-[11px] text-slate-400">
+                  ডাইনামিক নচ/কার্সার আঙুল বা মাউস দিয়ে ধরে স্ক্রিনের যেকোনো কোণায় সরাতে পারবেন এবং নিচের স্লাইডার দিয়ে ছোট-বড় করতে পারবেন।
+                </p>
+
+                <div className="flex items-center gap-3">
+                  <button
+                    type="button"
+                    onClick={() => updateField('notchScale', Math.max(0.55, Number((settings.notchScale - 0.08).toFixed(2))))}
+                    className="px-2.5 py-1 rounded-lg bg-white/5 hover:bg-white/10 border border-white/15 text-xs text-white cursor-pointer"
+                  >
+                    − ছোট
+                  </button>
+                  <input
+                    type="range"
+                    min={0.55}
+                    max={1.35}
+                    step={0.03}
+                    value={settings.notchScale}
+                    onChange={(e) => updateField('notchScale', parseFloat(e.target.value))}
+                    className="flex-1 accent-cyan-400 cursor-pointer"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => updateField('notchScale', Math.min(1.35, Number((settings.notchScale + 0.08).toFixed(2))))}
+                    className="px-2.5 py-1 rounded-lg bg-white/5 hover:bg-white/10 border border-white/15 text-xs text-white cursor-pointer"
+                  >
+                    + বড়
+                  </button>
+                </div>
+
+                <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
+                  <button
+                    type="button"
+                    onClick={() => updateField('notchScale', 0.82)}
+                    className="px-3 py-1.5 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 text-[11px] text-slate-300 cursor-pointer"
+                  >
+                    ডিফল্ট সাইজ (82%)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => updateField('notchPosition', null)}
+                    className="px-3 py-1.5 rounded-xl bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-400/35 text-[11px] text-cyan-200 inline-flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <MapPinOff className="w-3.5 h-3.5" />
+                    <span>পজিশন রিসেট (Top Center)</span>
+                  </button>
+                </div>
+              </div>
+
               <div className="p-4 rounded-2xl bg-[#0d111a] border border-purple-500/30 space-y-3">
                 <h3 className="text-xs font-bold uppercase tracking-wider text-white">
-                  Dynamic Notch Interactive Behaviour
+                  Voice Silence & Dynamic Notch Behaviour
                 </h3>
+
+                <label className="flex items-center justify-between gap-3 p-2.5 rounded-xl bg-[#06080c] border border-emerald-500/25 cursor-pointer">
+                  <div className="flex items-start gap-2.5">
+                    <VolumeX className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+                    <div>
+                      <div className="text-xs font-semibold text-white">
+                        শুধু আমি কথা বললেই উত্তর দেবে (Silent Until You Speak)
+                      </div>
+                      <div className="text-[11px] text-slate-400">
+                        চালু থাকলে নিজে থেকে একা একা কথা বলবে না — আপনি কথা বললে বা প্রশ্ন করলেই শুধু কথা বলবে, তার আগে চুপচাপ থাকবে।
+                      </div>
+                    </div>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={settings.silentUntilUserSpeaks}
+                    onChange={(e) => updateField('silentUntilUserSpeaks', e.target.checked)}
+                    className="w-4 h-4 accent-emerald-400"
+                  />
+                </label>
 
                 <label className="flex items-center justify-between gap-3 p-2.5 rounded-xl bg-[#06080c] border border-white/10 cursor-pointer">
                   <div>
@@ -547,10 +693,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 <label className="flex items-center justify-between gap-3 p-2.5 rounded-xl bg-[#06080c] border border-white/10 cursor-pointer">
                   <div>
                     <div className="text-xs font-semibold text-white">
-                      Dizzy Spin Reaction ("মাথা ঘুরছে" অনুভূতি)
+                      Dizzy Spin Reaction (চোখ ঘোরার এক্সপ্রেশন)
                     </div>
                     <div className="text-[11px] text-slate-400">
-                      স্ক্রিনে আঙুল রেখে দ্রুত গিজিমিজি/গোল করে ঘুরালে ওর মাথা ঘুরবে এবং মুখে "মাথা ঘুরছে" বলবে।
+                      স্ক্রিনে আঙুল রেখে দ্রুত গিজিমিজি করলে চোখে চক্কর দেখাবে।
                     </div>
                   </div>
                   <input
