@@ -140,8 +140,6 @@ export function getVoiceOption(profile?: string | null): VoiceOption {
 }
 
 export interface BrahmaSettings {
-  geminiApiKey: string;
-  verifiedModel: string;
   assistantName: string;
   voiceProfile: VoiceProfile;
   serverUrl: string;
@@ -198,8 +196,6 @@ const MEMORY_STORAGE_KEY = 'brahma_local_memories_v1';
 const IDENTITY_STORAGE_KEY = 'brahma_local_identity_v1';
 
 const DEFAULT_SETTINGS: BrahmaSettings = {
-  geminiApiKey: '',
-  verifiedModel: 'gemini-4-hydrogen',
   assistantName: 'ব্রহ্মা AI',
   voiceProfile: 'male-deep-hard',
   serverUrl: '',
@@ -226,29 +222,43 @@ export function isNativeApkRuntime(): boolean {
   );
 }
 
+function sanitizeSettingsObject(parsed: Partial<BrahmaSettings> & Record<string, unknown>): BrahmaSettings {
+  const rest: Record<string, unknown> = { ...parsed };
+  delete rest.geminiApiKey;
+  delete rest.verifiedModel;
+  return {
+    ...DEFAULT_SETTINGS,
+    ...(rest as Partial<BrahmaSettings>),
+    voiceProfile: normalizeVoiceProfile(parsed.voiceProfile),
+    assistantName: (parsed.assistantName || DEFAULT_SETTINGS.assistantName).trim() || DEFAULT_SETTINGS.assistantName,
+    notchScale:
+      typeof parsed.notchScale === 'number'
+        ? Math.min(1.4, Math.max(0.55, parsed.notchScale))
+        : DEFAULT_SETTINGS.notchScale,
+  };
+}
+
 export function loadBrahmaSettings(): BrahmaSettings {
   try {
     const raw = localStorage.getItem(SETTINGS_STORAGE_KEY);
     if (!raw) return { ...DEFAULT_SETTINGS };
-    const parsed = JSON.parse(raw) as Partial<BrahmaSettings>;
-    return {
-      ...DEFAULT_SETTINGS,
-      ...parsed,
-      voiceProfile: normalizeVoiceProfile(parsed.voiceProfile),
-      assistantName: (parsed.assistantName || DEFAULT_SETTINGS.assistantName).trim() || DEFAULT_SETTINGS.assistantName,
-      notchScale: typeof parsed.notchScale === 'number' ? Math.min(1.4, Math.max(0.55, parsed.notchScale)) : DEFAULT_SETTINGS.notchScale,
-    };
+    const parsed = JSON.parse(raw) as Partial<BrahmaSettings> & Record<string, unknown>;
+    const clean = sanitizeSettingsObject(parsed);
+    if ('geminiApiKey' in parsed || 'verifiedModel' in parsed) {
+      localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(clean));
+    }
+    return clean;
   } catch {
     return { ...DEFAULT_SETTINGS };
   }
 }
 
 export function saveBrahmaSettings(next: Partial<BrahmaSettings>): BrahmaSettings {
-  const merged = {
+  const merged = sanitizeSettingsObject({
     ...loadBrahmaSettings(),
     ...next,
     voiceProfile: normalizeVoiceProfile(next.voiceProfile ?? loadBrahmaSettings().voiceProfile),
-  };
+  });
   try {
     localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(merged));
   } catch {
@@ -260,8 +270,7 @@ export function saveBrahmaSettings(next: Partial<BrahmaSettings>): BrahmaSetting
 export function getApiBaseUrl(): string {
   const cfg = loadBrahmaSettings();
   const custom = cfg.serverUrl.trim().replace(/\/+$/, '');
-  if (custom) return custom;
-  if (isNativeApkRuntime()) return '';
+  if (custom && /^https?:\/\/.+/.test(custom)) return custom;
   return '';
 }
 
@@ -343,301 +352,49 @@ export async function requestPermissionByKey(key: string): Promise<boolean> {
   return false;
 }
 
-const LATEST_GEMINI_MODELS = [
-  'gemini-4-hydrogen',
-  'gemini-3.1-flash-lite',
-  'gemini-2.5-flash',
-];
-
-async function postJsonTransport(
-  url: string,
-  payload: unknown
-): Promise<{ ok: boolean; status: number; data: Record<string, unknown> }> {
-  const bodyStr = JSON.stringify(payload);
-  try {
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: bodyStr,
-    });
-    const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
-    return { ok: res.ok, status: res.status, data };
-  } catch (fetchErr) {
-    const native = getBrahmaNative();
-    if (native?.httpPostJson) {
-      try {
-        const raw = native.httpPostJson(url, bodyStr);
-        const parsed = JSON.parse(raw || '{}') as { ok?: boolean; status?: number; body?: string; error?: string };
-        const data = parsed.body
-          ? (JSON.parse(parsed.body) as Record<string, unknown>)
-          : { error: { message: parsed.error || 'Native HTTP failed' } };
-        return {
-          ok: Boolean(parsed.ok),
-          status: parsed.status ?? (parsed.ok ? 200 : 500),
-          data,
-        };
-      } catch {
-        // fall through
-      }
-    }
-    throw fetchErr;
-  }
-}
-
-async function getJsonTransport(
-  url: string
-): Promise<{ ok: boolean; status: number; data: Record<string, unknown> }> {
-  try {
-    const res = await fetch(url);
-    const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
-    return { ok: res.ok, status: res.status, data };
-  } catch (fetchErr) {
-    const native = getBrahmaNative();
-    if (native?.httpGet) {
-      try {
-        const raw = native.httpGet(url);
-        const parsed = JSON.parse(raw || '{}') as { ok?: boolean; status?: number; body?: string; error?: string };
-        const data = parsed.body
-          ? (JSON.parse(parsed.body) as Record<string, unknown>)
-          : { error: { message: parsed.error || 'Native HTTP failed' } };
-        return {
-          ok: Boolean(parsed.ok),
-          status: parsed.status ?? (parsed.ok ? 200 : 500),
-          data,
-        };
-      } catch {
-        // fall through
-      }
-    }
-    throw fetchErr;
-  }
-}
-
-export async function verifyGeminiApiKey(
-  rawKey: string
-): Promise<{ ok: boolean; model?: string; message: string }> {
-  const key = rawKey.trim();
-  if (!key) {
-    return { ok: false, message: 'অনুগ্রহ করে আগে একটি Gemini API Key লিখুন।' };
-  }
-
-  let lastErr = '';
-  // 1. Test latest active Gemini models directly (using native bridge fallback on APK WebView if needed)
-  for (const model of LATEST_GEMINI_MODELS) {
-    try {
-      const resp = await postJsonTransport(
-        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(key)}`,
-        {
-          contents: [{ role: 'user', parts: [{ text: 'Reply with OK only.' }] }],
-        }
-      );
-      if (resp.ok) {
-        saveBrahmaSettings({ geminiApiKey: key, verifiedModel: model });
-        return {
-          ok: true,
-          model,
-          message: `Verified! (${model}) — লেটেস্ট Gemini API দিয়ে ভয়েস, চ্যাট, ভিশন ও অটোমেশন সক্রিয়।`,
-        };
-      }
-      const errObj = resp.data?.error as { message?: string; status?: string } | undefined;
-      lastErr = errObj?.message || `HTTP ${resp.status}`;
-      if (resp.status === 400 || resp.status === 403) {
-        if (/API_KEY_INVALID|API key not valid|PERMISSION_DENIED/i.test(lastErr)) {
-          return {
-            ok: false,
-            message: `API Key টি সঠিক নয় অথবা অনুমোদিত নয় (${lastErr})।`,
-          };
-        }
-      }
-    } catch (err: unknown) {
-      lastErr = err instanceof Error ? err.message : 'ইন্টারনেট বা এপিআই সংযোগ ব্যর্থ হয়েছে।';
-    }
-  }
-
-  // 2. Fallback model discovery: query available models on this key so APK verification always works with newest releases
-  try {
-    const listResp = await getJsonTransport(
-      `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(key)}`
-    );
-    if (listResp.ok && Array.isArray(listResp.data?.models)) {
-      const models = listResp.data.models as Array<{ name?: string; supportedGenerationMethods?: string[] }>;
-      const valid = models.find(
-        (m) =>
-          m.name &&
-          Array.isArray(m.supportedGenerationMethods) &&
-          m.supportedGenerationMethods.includes('generateContent') &&
-          /gemini-(4|3\.|2\.5)/i.test(m.name)
-      );
-      const picked = valid?.name?.replace(/^models\//, '') || 'gemini-4-hydrogen';
-      saveBrahmaSettings({ geminiApiKey: key, verifiedModel: picked });
-      return {
-        ok: true,
-        model: picked,
-        message: `Verified! (${picked}) — লেটেস্ট Gemini মডেল অটো-ডিটেক্ট করে সেভ করা হয়েছে।`,
-      };
-    }
-  } catch (err: unknown) {
-    if (!lastErr) {
-      lastErr = err instanceof Error ? err.message : 'Network error';
-    }
-  }
-
-  return {
-    ok: false,
-    message: lastErr ? `API Key যাচাই করা যায়নি: ${lastErr}` : 'API Key যাচাই করা যায়নি।',
-  };
-}
-
 export async function verifyServerConnection(
-  url: string
-): Promise<{ ok: boolean; latencyMs: number; message: string }> {
-  const clean = url.trim().replace(/\/+$/, '');
-  if (!clean) return { ok: false, latencyMs: 0, message: 'সার্ভার URL খালি আছে।' };
+  url?: string
+): Promise<{ ok: boolean; latencyMs: number; geminiConfigured: boolean; message: string }> {
+  const clean = (url || '').trim().replace(/\/+$/, '');
+  const endpoint = clean ? `${clean}/api/health` : '/api/health';
+  if (isNativeApkRuntime() && !clean) {
+    return {
+      ok: false,
+      latencyMs: 0,
+      geminiConfigured: false,
+      message: 'Android APK মোডে সার্ভারের সাথে যুক্ত হতে আপনার সার্ভার URL দিন।',
+    };
+  }
   const t0 = Date.now();
   try {
-    const res = await fetch(`${clean}/api/health`);
+    const res = await fetch(endpoint);
     const latencyMs = Date.now() - t0;
     const data = (await res.json()) as { ok?: boolean; geminiConfigured?: boolean };
     if (res.ok && data.ok) {
+      const configured = Boolean(data.geminiConfigured);
       return {
         ok: true,
         latencyMs,
-        message: `Connected (${latencyMs}ms) · Server Gemini: ${data.geminiConfigured ? 'Ready' : 'No Key'}`,
+        geminiConfigured: configured,
+        message: configured
+          ? `Server Connected (${latencyMs}ms) · Gemini Neural Core Active`
+          : `Server Connected (${latencyMs}ms) · ব্রেন চালু করতে AI Studio-র Settings > Secrets-এ GEMINI_API_KEY সেট করুন।`,
       };
     }
-    return { ok: false, latencyMs, message: `Server returned HTTP ${res.status}` };
+    return {
+      ok: false,
+      latencyMs,
+      geminiConfigured: false,
+      message: `Server returned HTTP ${res.status}`,
+    };
   } catch (err: unknown) {
     return {
       ok: false,
       latencyMs: Date.now() - t0,
+      geminiConfigured: false,
       message: err instanceof Error ? err.message : 'সার্ভারের সাথে সংযোগ স্থাপন করা যায়নি।',
     };
   }
-}
-
-// ---------------------------------------------------------------------------
-// Direct Gemini REST Client for Standalone Android APK Execution (Latest APIs)
-// ---------------------------------------------------------------------------
-async function callGeminiDirect(
-  promptParts: Array<Record<string, unknown>>,
-  systemInstruction?: string,
-  expectJson = false
-): Promise<string> {
-  const settings = loadBrahmaSettings();
-  const key = settings.geminiApiKey.trim();
-  if (!key) {
-    throw new Error('NO_GEMINI_KEY');
-  }
-
-  const body: Record<string, unknown> = {
-    contents: [{ role: 'user', parts: promptParts }],
-  };
-  if (systemInstruction) {
-    body.systemInstruction = { parts: [{ text: systemInstruction }] };
-  }
-  if (expectJson) {
-    body.generationConfig = { responseMimeType: 'application/json' };
-  }
-
-  const candidates = Array.from(
-    new Set([settings.verifiedModel || 'gemini-4-hydrogen', ...LATEST_GEMINI_MODELS])
-  );
-  let lastError = 'Gemini request failed';
-
-  for (const model of candidates) {
-    const resp = await postJsonTransport(
-      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(key)}`,
-      body
-    );
-    if (resp.ok) {
-      const cands = resp.data?.candidates as Array<{ content?: { parts?: Array<{ text?: string }> } }> | undefined;
-      return cands?.[0]?.content?.parts?.[0]?.text || '';
-    }
-    const errObj = resp.data?.error as { message?: string } | undefined;
-    lastError = errObj?.message || `Gemini HTTP ${resp.status}`;
-    if (resp.status !== 404) {
-      throw new Error(lastError);
-    }
-  }
-  throw new Error(lastError);
-}
-
-async function callGeminiTtsDirect(
-  text: string,
-  voiceProfile: string,
-  languageMode: string
-): Promise<{ audioBase64: string; mimeType: string; voiceName: string } | null> {
-  const settings = loadBrahmaSettings();
-  const key = settings.geminiApiKey.trim();
-  if (!key) return null;
-
-  const cleanText = text
-    .replace(/```[\s\S]*?```/g, '')
-    .replace(/[*_`#>]/g, '')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .slice(0, 1200);
-  if (!cleanText) return null;
-
-  const voiceOpt = getVoiceOption(voiceProfile);
-  const hasBn = /[\u0980-\u09FF]/.test(cleanText);
-  const hasHi = /[\u0900-\u097F]/.test(cleanText);
-  const langHint =
-    languageMode === 'bn' || hasBn
-      ? 'Speak in 100% pure native Bengali (Bangla) like a real native speaker with zero English accent.'
-      : languageMode === 'hi' || hasHi
-        ? 'Speak in 100% pure native Hindi like a real native speaker with zero English accent.'
-        : 'Speak naturally with human warmth and zero robotic drawl.';
-
-  const ttsModels = ['gemini-3.8-flash-tts', 'gemini-3.8-flash-lite-tts'];
-  for (const model of ttsModels) {
-    try {
-      const resp = await postJsonTransport(
-        `https://generativelanguage.googleapis.com/v1alpha/models/${model}:generateContent?key=${encodeURIComponent(key)}`,
-        {
-          contents: [
-            {
-              role: 'user',
-              parts: [
-                {
-                  text: cleanText,
-                  speechMetadata: {
-                    style: `${voiceOpt.stylePrompt} ${langHint}`,
-                  },
-                },
-              ],
-            },
-          ],
-          generationConfig: {
-            responseModalities: ['AUDIO'],
-            speechConfig: {
-              voiceConfig: {
-                prebuiltVoiceConfig: {
-                  voiceName: voiceOpt.geminiVoice,
-                },
-              },
-            },
-          },
-        }
-      );
-      if (resp.ok) {
-        const cands = resp.data?.candidates as
-          | Array<{ content?: { parts?: Array<{ inlineData?: { data?: string; mimeType?: string } }> } }>
-          | undefined;
-        const part = cands?.[0]?.content?.parts?.[0]?.inlineData;
-        if (part?.data) {
-          return {
-            audioBase64: part.data,
-            mimeType: part.mimeType || 'audio/wav',
-            voiceName: voiceOpt.geminiVoice,
-          };
-        }
-      }
-    } catch {
-      // try next tts model
-    }
-  }
-  return null;
 }
 
 function getLocalStore<T>(key: string, fallback: T): T {
@@ -794,20 +551,13 @@ async function handleStandaloneFallback(
 
   // 1. Health
   if (path === '/api/health') {
-    const cfg = loadBrahmaSettings();
-    return jsonRes({ ok: true, mode: 'standalone-apk', geminiConfigured: Boolean(cfg.geminiApiKey) });
+    return jsonRes({ ok: false, mode: 'offline-local', geminiConfigured: false });
   }
 
-  // 2. Chat
+  // 2. Chat (Local device reflexes work offline; AI brain requires server connection)
   if (path === '/api/chat' && method === 'POST') {
     const t0 = Date.now();
     const message = String(bodyObj.message || '').trim();
-    const languageMode = String(bodyObj.languageMode || 'bn');
-    const imageBase64 = bodyObj.imageBase64 ? String(bodyObj.imageBase64) : null;
-    const imageMimeType = String(bodyObj.imageMimeType || 'image/jpeg');
-    const history = Array.isArray(bodyObj.history)
-      ? (bodyObj.history as Array<{ role: string; text: string }>)
-      : [];
 
     // Popup visibility voice triggers work offline too
     if (/(?:পপ\s*-?\s*আপ|উইন্ডো|ডিসপ্লে).*(?:দেখাও|খোলো|ওপেন|show|open)/i.test(message) || /show\s+popup/i.test(message)) {
@@ -843,95 +593,29 @@ async function handleStandaloneFallback(
       });
     }
 
-    const langGuide =
-      languageMode === 'hi'
-        ? 'STRICT RULE: Respond ONLY in pure, natural, everyday Hindi (हिन्दी देवनागरी) like a real human. Never use English words, Hinglish, or English accent phrasing.'
-        : languageMode === 'en'
-          ? 'Respond concisely in natural human English.'
-          : 'STRICT RULE: Respond ONLY in pure, natural, everyday Bengali (বাংলা) like a real human. Never mix random English words or Banglish; write naturally in clean Bengali script so native speech sounds 100% authentic with zero English accent.';
-
-    const currentSettings = loadBrahmaSettings();
-    const assistantName = String(bodyObj.assistantName || currentSettings.assistantName || 'ব্রহ্মা AI').trim();
-
-    try {
-      const parts: Array<Record<string, unknown>> = [];
-      if (imageBase64) {
-        parts.push({
-          inline_data: {
-            mime_type: imageMimeType,
-            data: imageBase64.replace(/^data:[^;]+;base64,/, ''),
-          },
-        });
-      }
-      const histCtx = history
-        .slice(-6)
-        .map((h) => `${h.role === 'user' ? 'User' : assistantName}: ${h.text}`)
-        .join('\n');
-      parts.push({
-        text: histCtx ? `${histCtx}\nUser: ${message}` : message,
-      });
-
-      const reply = await callGeminiDirect(
-        parts,
-        `You are ${assistantName}, a loyal, deeply intelligent human-like AI companion running on the user's Android phone. Always identify yourself as "${assistantName}" if asked. ${langGuide}`
-      );
-      return jsonRes({
-        reply: reply || 'নির্দেশ সম্পন্ন হয়েছে।',
-        tier: 3,
-        intent: 'conversation',
-        orbState: 'SPEAKING',
-        latencyMs: Date.now() - t0,
-      });
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : '';
-      if (msg === 'NO_GEMINI_KEY') {
-        return jsonRes(
-          {
-            error:
-              'অফলাইন Android APK মোডে কথা বলতে উপরে ডানদিকের ⚙ Settings → API Key ট্যাবে গিয়ে আপনার Gemini API Key দিয়ে Verify করুন (অথবা Server URL সেট করুন)।',
-          },
-          400
-        );
-      }
-      return jsonRes({ error: `Gemini Error: ${msg}` }, 500);
-    }
+    return jsonRes(
+      {
+        error: isNativeApkRuntime()
+          ? 'সার্ভারের সাথে সংযোগ নেই। অনুগ্রহ করে ⚙ Settings → নাম ও সার্ভার সংযোগ ট্যাবে গিয়ে আপনার সার্ভার URL যাচাই করুন।'
+          : 'ব্রহ্মা AI সার্ভারের সাথে সংযোগ স্থাপন করা যায়নি। অনুগ্রহ করে ইন্টারনেট বা সার্ভার স্ট্যাটাস চেক করুন।',
+      },
+      503
+    );
   }
 
-  // 3. TTS -> Use Gemini 3.8 Neural TTS directly in APK when key exists, else fallback to Native Android TTS
+  // 3. TTS -> Fallback to Native Android / Browser TTS when server is unreachable offline
   if (path === '/api/tts' && method === 'POST') {
-    const ttsText = String(bodyObj.text || '');
-    const vp = String(bodyObj.voiceProfile || loadBrahmaSettings().voiceProfile);
-    const lm = String(bodyObj.languageMode || 'bn');
-    const directAudio = await callGeminiTtsDirect(ttsText, vp, lm);
-    if (directAudio) {
-      return jsonRes(directAudio);
-    }
     return jsonRes({ useNativeTts: true });
   }
 
-  // 4. Live Vision Single-Frame
+  // 4. Live Vision Single-Frame (requires server)
   if (path === '/api/vision/analyze-frame' && method === 'POST') {
-    try {
-      const img = String(bodyObj.imageBase64 || '').replace(/^data:[^;]+;base64,/, '');
-      const mimeType = String(bodyObj.mimeType || 'image/jpeg');
-      const prompt = String(bodyObj.prompt || 'এই ছবিতে কী আছে তা বাংলায় বিস্তারিত বলো।');
-      const analysis = await callGeminiDirect([
-        { inline_data: { mime_type: mimeType, data: img } },
-        { text: prompt },
-      ]);
-      return jsonRes({ analysis });
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Vision error';
-      return jsonRes(
-        {
-          error:
-            msg === 'NO_GEMINI_KEY'
-              ? 'ভিশন ব্যবহারের জন্য ⚙ Settings → API Key ট্যাবে Gemini API Key যোগ করুন।'
-              : msg,
-        },
-        400
-      );
-    }
+    return jsonRes(
+      {
+        error: 'লাইভ ভিশন বিশ্লেষণের জন্য ব্রহ্মা সার্ভারের সাথে সংযোগ প্রয়োজন।',
+      },
+      503
+    );
   }
 
   // 5. Automations
@@ -972,42 +656,10 @@ async function handleStandaloneFallback(
     return jsonRes({ workflows: list });
   }
   if (path === '/api/automations/create-ai' && method === 'POST') {
-    const prompt = String(bodyObj.prompt || '').trim();
-    const list = getLocalStore(AUTOMATIONS_STORAGE_KEY, DEFAULT_LOCAL_AUTOMATIONS);
-    try {
-      const raw = await callGeminiDirect(
-        [
-          {
-            text: `Convert this user automation request into JSON with { "name": string, "description": string, "triggerPhrase": string, "steps": [{ "type": "speak_briefing"|"orb_state"|"open_module", "label": string, "message": string }] }: "${prompt}"`,
-          },
-        ],
-        undefined,
-        true
-      );
-      const parsed = JSON.parse(raw || '{}') as Partial<AutomationWorkflow>;
-      const created: AutomationWorkflow = {
-        id: `auto-${Date.now()}`,
-        name: parsed.name || prompt.slice(0, 32),
-        description: parsed.description || prompt,
-        triggerPhrase: parsed.triggerPhrase || prompt.slice(0, 24),
-        triggerType: 'voice',
-        enabled: true,
-        runCount: 0,
-        steps:
-          Array.isArray(parsed.steps) && parsed.steps.length > 0
-            ? parsed.steps
-            : [{ type: 'speak_briefing', label: 'Execute AI Rule', message: prompt }],
-      };
-      list.unshift(created);
-      setLocalStore(AUTOMATIONS_STORAGE_KEY, list);
-      return jsonRes({ workflows: list });
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : '';
-      return jsonRes(
-        { error: msg === 'NO_GEMINI_KEY' ? 'Settings → API Key ট্যাবে Gemini Key দিন।' : msg },
-        400
-      );
-    }
+    return jsonRes(
+      { error: 'AI অটোমেশন তৈরি করতে ব্রহ্মা সার্ভারের সাথে সংযোগ প্রয়োজন।' },
+      503
+    );
   }
 
   // 6. Smart Home
@@ -1072,41 +724,7 @@ async function handleStandaloneFallback(
     return jsonRes({ skills: getLocalStore(SKILLS_STORAGE_KEY, DEFAULT_LOCAL_SKILLS) });
   }
   if (path === '/api/skills/forge' && method === 'POST') {
-    const prompt = String(bodyObj.prompt || '');
-    const skills = getLocalStore(SKILLS_STORAGE_KEY, DEFAULT_LOCAL_SKILLS);
-    try {
-      const raw = await callGeminiDirect(
-        [
-          {
-            text: `Create a pure JS skill function body for: "${prompt}". Return JSON { "name": string, "description": string, "trigger": string, "code": string }.`,
-          },
-        ],
-        undefined,
-        true
-      );
-      const parsed = JSON.parse(raw || '{}') as Partial<SkillEntry>;
-      const entry: SkillEntry = {
-        id: `sk-${Date.now()}`,
-        name: parsed.name || 'Custom On-Device Skill',
-        version: '1.0.0',
-        evolutionCount: 0,
-        category: 'ultron-forged',
-        description: parsed.description || prompt,
-        trigger: parsed.trigger || prompt.slice(0, 20),
-        status: 'active',
-        code: parsed.code || 'return { ok: true };',
-        testsPassed: 1,
-        testsTotal: 1,
-        executions: 0,
-        createdAt: new Date().toISOString(),
-      };
-      skills.unshift(entry);
-      setLocalStore(SKILLS_STORAGE_KEY, skills);
-      return jsonRes({ skill: entry, skills });
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : '';
-      return jsonRes({ error: msg === 'NO_GEMINI_KEY' ? 'Settings → API Key ট্যাবে Key দিন।' : msg }, 400);
-    }
+    return jsonRes({ error: 'Skill Forge ব্যবহারের জন্য ব্রহ্মা সার্ভারের সাথে সংযোগ প্রয়োজন।' }, 503);
   }
 
   // 9. Identity & Memory
@@ -1246,31 +864,10 @@ async function handleStandaloneFallback(
     return jsonRes({ presets: [{ id: 'esp-dht', title: fallbackCircuit.title, description: fallbackCircuit.description, data: fallbackCircuit }] });
   }
   if (path === '/api/circuit/solve' && method === 'POST') {
-    try {
-      const q = String(bodyObj.query || 'ESP32 LED circuit');
-      const raw = await callGeminiDirect(
-        [
-          {
-            text: `Generate a CircuitSchematic JSON for "${q}" with fields title, description, components ([{id,name,subtitle,left_pins:[{name,color}],right_pins:[{name,color}]}]), wires ([{from:"id:side:pin",to:"id:side:pin",color,label,step}]), warnings (string[]), steps (string[]).`,
-          },
-        ],
-        undefined,
-        true
-      );
-      return jsonRes({ schematic: JSON.parse(raw || '{}') });
-    } catch (err: unknown) {
-      return jsonRes({ error: err instanceof Error ? err.message : 'Circuit error' }, 400);
-    }
+    return jsonRes({ error: 'কাস্টম সার্কিট সলভ করার জন্য ব্রহ্মা সার্ভারের সাথে সংযোগ প্রয়োজন।' }, 503);
   }
   if (path === '/api/office/generate' && method === 'POST') {
-    try {
-      const topic = String(bodyObj.topic || '');
-      const docType = String(bodyObj.docType || 'document');
-      const content = await callGeminiDirect([{ text: `Generate a structured ${docType} in Markdown for: ${topic}` }]);
-      return jsonRes({ docType: 'document', result: { title: topic, markdown: content } });
-    } catch (err: unknown) {
-      return jsonRes({ error: err instanceof Error ? err.message : 'Office error' }, 400);
-    }
+    return jsonRes({ error: 'Office Architect ব্যবহারের জন্য ব্রহ্মা সার্ভারের সাথে সংযোগ প্রয়োজন।' }, 503);
   }
 
   if (path === '/api/remote/state') {
@@ -1283,19 +880,21 @@ async function handleStandaloneFallback(
 export async function brahmaFetch(path: string, init?: RequestInit): Promise<Response> {
   const baseUrl = getApiBaseUrl();
 
-  // Inside native Android APK with no custom serverUrl configured, go straight to on-device standalone engine
+  // Inside native Android APK with no custom serverUrl configured, use local device bridge
   if (isNativeApkRuntime() && !baseUrl) {
     return handleStandaloneFallback(path, init);
   }
 
   try {
-    const res = await fetch(`${baseUrl}${path}`, init);
-    // If server returned 404/502/503 on APK or missing backend, fallback cleanly when Gemini key exists
-    if (!res.ok && res.status >= 500 && loadBrahmaSettings().geminiApiKey.trim()) {
-      return handleStandaloneFallback(path, init);
-    }
-    return res;
+    return await fetch(`${baseUrl}${path}`, init);
   } catch {
+    if (baseUrl && !isNativeApkRuntime()) {
+      try {
+        return await fetch(path, init);
+      } catch {
+        // fall through to offline fallback
+      }
+    }
     return handleStandaloneFallback(path, init);
   }
 }

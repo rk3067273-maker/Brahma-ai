@@ -17,9 +17,15 @@ const __dirname = path.dirname(__filename);
 
 const PORT = 3000;
 
+function getServerGeminiKey(): string {
+  const key = (process.env.GEMINI_API_KEY || process.env.API_KEY || '').trim();
+  if (!key || key === 'MY_GEMINI_API_KEY') return '';
+  return key;
+}
+
 function getGeminiClient(): GoogleGenAI | null {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey || apiKey === 'MY_GEMINI_API_KEY') return null;
+  const apiKey = getServerGeminiKey();
+  if (!apiKey) return null;
   return new GoogleGenAI({
     apiKey,
     httpOptions: {
@@ -1180,6 +1186,16 @@ async function startServer() {
   const app = express();
   app.use(express.json({ limit: '15mb' }));
 
+  app.use('/api', (req, res, next) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    if (req.method === 'OPTIONS') {
+      return res.sendStatus(204);
+    }
+    return next();
+  });
+
   app.use('/brahma-assets', express.static(path.join(__dirname, 'public', 'brahma-assets')));
   app.use('/preview-apps', express.static(PROJECTS_ROOT));
 
@@ -1188,6 +1204,12 @@ async function startServer() {
       ok: true,
       service: 'Brahma AI Evo Android Edition Core',
       geminiConfigured: Boolean(getGeminiClient()),
+      models: {
+        chat: 'gemini-4-hydrogen',
+        tts: 'gemini-3.8-flash-tts',
+        live: 'gemini-3.8-live',
+        transcribe: 'gemini-3.5-transcribe',
+      },
       uptimeSec: Math.round(process.uptime()),
     });
   });
@@ -1437,43 +1459,75 @@ async function startServer() {
       }
     }
 
-    // Tier 2: Learned Phrase Cache
+    // Tier 2: Learned Phrase Cache (skip any empty/legacy placeholder phrases)
     const normalizedKey = `${languageMode}::${lower.replace(/[^\p{L}\p{N}\s]/gu, '').trim()}`;
     if (!imageBase64 && intentPhraseCache.has(normalizedKey)) {
       const cached = intentPhraseCache.get(normalizedKey)!;
-      return res.json({
-        tier: 2,
-        intent: cached.intent,
-        moduleToOpen: cached.moduleToOpen,
-        orbState: 'SPEAKING',
-        latencyMs: Date.now() - start,
-        reply: cached.reply,
-      });
+      if (
+        cached.reply &&
+        !/^নির্দেশ (সম্পন্ন|সম্পূর্ণ) হয়েছে[।.]?$/.test(cached.reply.trim())
+      ) {
+        return res.json({
+          tier: 2,
+          intent: cached.intent,
+          moduleToOpen: cached.moduleToOpen,
+          orbState: 'SPEAKING',
+          latencyMs: Date.now() - start,
+          reply: cached.reply,
+        });
+      }
+      intentPhraseCache.delete(normalizedKey);
     }
 
     // Tier 3: Gemini 4 Hydrogen Brain with Pure Native Bengali / Hindi Enforcement
     const ai = getGeminiClient();
     if (!ai) {
+      const noKeyReply =
+        languageMode === 'hi'
+          ? 'सर्वर पर Gemini Neural Key सेट नहीं है। कृपया AI Studio के Settings > Secrets पैनल में GEMINI_API_KEY जोड़ें।'
+          : languageMode === 'en'
+            ? 'Server Gemini Neural Core is not configured yet. Please add GEMINI_API_KEY in AI Studio Settings > Secrets.'
+            : 'সার্ভারে Gemini Neural Core এখনও কনফিগার করা হয়নি। অনুগ্রহ করে AI Studio-র Settings > Secrets প্যানেলে GEMINI_API_KEY সেট করুন।';
       return res.status(503).json({
-        error: 'GEMINI_API_KEY is not configured in environment secrets.',
+        error: noKeyReply,
       });
     }
+
+    const extractReplyText = (resp: unknown): string => {
+      const r = resp as {
+        text?: string;
+        candidates?: Array<{
+          content?: { parts?: Array<{ text?: string; thought?: boolean }> };
+        }>;
+      };
+      const direct = typeof r?.text === 'string' ? r.text.trim() : '';
+      if (direct) return direct;
+      const parts = r?.candidates?.[0]?.content?.parts;
+      if (Array.isArray(parts)) {
+        return parts
+          .filter((p) => typeof p?.text === 'string' && !p.thought)
+          .map((p) => p.text)
+          .join('')
+          .trim();
+      }
+      return '';
+    };
 
     try {
       const langDirective =
         languageMode === 'bn'
-          ? 'STRICT LANGUAGE RULE: Always reply ONLY in pure, natural, everyday conversational Bengali script (বাংলা) like a real human. Never mix English words or transliterated Banglish; express even technical ideas cleanly in Bengali so native speech sounds 100% authentic with zero English accent.'
+          ? 'STRICT LANGUAGE RULE: Always reply ONLY in pure, natural, everyday conversational Bengali script (বাংলা) like a real warm human friend/assistant. Avoid stiff textbook language or robotic templates.'
           : languageMode === 'hi'
-            ? 'STRICT LANGUAGE RULE: Always reply ONLY in pure, natural, everyday conversational Hindi Devanagari script (हिन्दी) like a real human. Never mix English words or Hinglish; express ideas cleanly in natural Hindi so native speech sounds 100% authentic with zero English accent.'
+            ? 'STRICT LANGUAGE RULE: Always reply ONLY in pure, natural, everyday conversational Hindi Devanagari script (हिन्दी) like a real warm human friend/assistant. Avoid stiff textbook language or robotic templates.'
             : languageMode === 'en'
-              ? 'Reply clearly and concisely in natural human English.'
-              : 'LANGUAGE ADAPTATION RULE: Detect the user language automatically. If the user writes or speaks in Bengali or Banglish, reply strictly in pure, natural conversational Bengali script (বাংলা) with zero forced English words. If the user writes or speaks in Hindi or Hinglish, reply strictly in pure, natural conversational Hindi Devanagari script (हिन्दी) with zero forced English words. Avoid awkward transliteration so the voice engine sounds completely native.';
+              ? 'Reply clearly, warmly, and naturally like a real human conversational partner in English.'
+              : 'LANGUAGE ADAPTATION RULE: Detect the user language automatically. If the user writes or speaks in Bengali or Banglish, reply strictly in pure, natural conversational Bengali script (বাংলা). If the user writes or speaks in Hindi or Hinglish, reply strictly in pure, natural conversational Hindi Devanagari script (हिन्दी). Keep tone genuinely human.';
 
-      const systemPrompt = `You are ${activeAssistantName}, an ultra-capable, deeply loyal, human-like AI companion. Always refer to yourself as "${activeAssistantName}" when asked your name.
+      const systemPrompt = `You are ${activeAssistantName}, an intelligent, perceptive, genuinely human-like AI companion. Always refer to yourself as "${activeAssistantName}" when asked your name.
 Owner: ${identityState.owner.preferred_name} (${identityState.owner.location}).
-Persona: Natural, warm yet confident, attentive, and intensely capable.
+Persona: Expressive, warm, attentive, thoughtful, and natural — never give generic robotic one-liners. Engage meaningfully with whatever the user asks or says.
 ${langDirective}
-Keep voice-ready replies crisp, natural like human speech, and free of raw markdown symbols unless structured lists are strictly requested.`;
+Keep voice-ready replies natural like spoken human conversation, and free of raw markdown symbols unless structured lists are explicitly requested.`;
 
       const contents: Array<Record<string, unknown>> = [];
       for (const h of history.slice(-8)) {
@@ -1497,15 +1551,40 @@ Keep voice-ready replies crisp, natural like human speech, and free of raw markd
       currentParts.push({ text: message || 'Analyze this image thoroughly.' });
       contents.push({ role: 'user', parts: currentParts });
 
-      const response = await ai.models.generateContent({
-        model: 'gemini-4-hydrogen',
-        contents,
-        config: {
-          systemInstruction: systemPrompt,
-        },
-      });
+      let reply = '';
+      let primaryErr = '';
+      try {
+        const primaryResp = await ai.models.generateContent({
+          model: 'gemini-4-hydrogen',
+          contents,
+          config: {
+            systemInstruction: systemPrompt,
+          },
+        });
+        reply = extractReplyText(primaryResp);
+      } catch (err: unknown) {
+        primaryErr = err instanceof Error ? err.message : String(err);
+      }
 
-      const reply = (response.text || 'নির্দেশ সম্পন্ন হয়েছে।').trim();
+      if (!reply) {
+        const fallbackResp = await ai.models.generateContent({
+          model: 'gemini-3.1-flash-lite',
+          contents,
+          config: {
+            systemInstruction: systemPrompt,
+          },
+        });
+        reply = extractReplyText(fallbackResp);
+      }
+
+      if (!reply) {
+        return res.status(502).json({
+          error: primaryErr
+            ? `Brahma Neural Core error: ${primaryErr}`
+            : 'Gemini মডেল থেকে কোনো টেক্সট উত্তর আসেনি। অনুগ্রহ করে আবার চেষ্টা করুন।',
+        });
+      }
+
       if (!imageBase64 && message.length < 90) {
         intentPhraseCache.set(normalizedKey, { intent: 'general_conversation', reply });
       }
@@ -1617,7 +1696,7 @@ Keep voice-ready replies crisp, natural like human speech, and free of raw markd
     const chosen = styleMap[voiceProfile] || styleMap['male-deep-hard'];
 
     const aiAlpha = new GoogleGenAI({
-      apiKey: process.env.GEMINI_API_KEY,
+      apiKey: getServerGeminiKey(),
       apiVersion: 'v1alpha',
       httpOptions: {
         headers: {
@@ -1627,8 +1706,9 @@ Keep voice-ready replies crisp, natural like human speech, and free of raw markd
     });
 
     const attempts: Array<{ client: GoogleGenAI; model: string; useSpeechConfig: boolean; useStyle: boolean }> = [
-      { client: aiAlpha, model: 'gemini-3.8-flash-tts', useSpeechConfig: true, useStyle: true },
       { client: ai, model: 'gemini-3.8-flash-tts', useSpeechConfig: true, useStyle: true },
+      { client: ai, model: 'gemini-3.8-flash-lite-tts', useSpeechConfig: true, useStyle: true },
+      { client: aiAlpha, model: 'gemini-3.8-flash-tts', useSpeechConfig: true, useStyle: true },
       { client: aiAlpha, model: 'gemini-3.8-flash-lite-tts', useSpeechConfig: true, useStyle: true },
       { client: ai, model: 'gemini-3.8-flash-lite-tts', useSpeechConfig: true, useStyle: false },
     ];
@@ -1651,7 +1731,9 @@ Keep voice-ready replies crisp, natural like human speech, and free of raw markd
 
         const partPayload: Record<string, unknown> = { text: cleanText };
         if (attempt.useStyle) {
-          partPayload.speechMetadata = { style: chosen.style };
+          partPayload.speechMetadata = {
+            style: `${chosen.style} Sound genuinely human with natural breath pauses, emotional inflection, and zero robotic monotony.`,
+          };
         }
 
         const response = await attempt.client.models.generateContent({
@@ -1665,11 +1747,13 @@ Keep voice-ready replies crisp, natural like human speech, and free of raw markd
           config,
         });
 
-        const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+        const parts = response.candidates?.[0]?.content?.parts ?? [];
+        const audioPart = parts.find((p) => p?.inlineData?.data);
+        const base64Audio = audioPart?.inlineData?.data;
         if (base64Audio) {
           return res.json({
             audioBase64: base64Audio,
-            mimeType: response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.mimeType || 'audio/wav',
+            mimeType: audioPart?.inlineData?.mimeType || 'audio/wav',
             voiceName: chosen.voice,
             modelUsed: attempt.model,
           });
@@ -2644,8 +2728,8 @@ Propose ONE brand new, genuinely practical executable skill (e.g. unit/currency 
   });
 
   wss.on('connection', async (clientWs, req) => {
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey || apiKey === 'MY_GEMINI_API_KEY') {
+    const apiKey = getServerGeminiKey();
+    if (!apiKey) {
       clientWs.send(JSON.stringify({ error: 'GEMINI_API_KEY is not configured.' }));
       clientWs.close();
       return;
@@ -2664,6 +2748,7 @@ Propose ONE brand new, genuinely practical executable skill (e.g. unit/currency 
     const reqUrl = new URL(req.url || '/ws/live-vision', `http://${req.headers.host || 'localhost'}`);
     const langParam = reqUrl.searchParams.get('lang') || 'bn';
     const voiceParam = reqUrl.searchParams.get('voice') || 'Charon';
+    const modeParam = reqUrl.searchParams.get('mode') || 'vision';
     const assistantNameParam = (reqUrl.searchParams.get('name') || identityState.assistant.name || 'ব্রহ্মা AI').trim();
     const silentParam = reqUrl.searchParams.get('silent') !== 'false';
     const allowedVoices = ['Charon', 'Fenrir', 'Puck', 'Kore', 'Zephyr'];
@@ -2677,10 +2762,15 @@ Propose ONE brand new, genuinely practical executable skill (e.g. unit/currency 
           : 'Speak ONLY in 100% pure, natural, human-like native Bengali (বাংলা) with zero English accent, zero Western drawl, and no Banglish.';
 
     const silenceRule = silentParam
-      ? 'CRITICAL SILENCE RULE: Stay completely silent and do NOT speak on your own while watching video frames. Wait quietly and ONLY speak when the user actually speaks to you or sends a text question.'
-      : 'Respond promptly to what changes on screen or when spoken to.';
+      ? 'CRITICAL SILENCE RULE: Stay completely silent and do NOT speak on your own first. Wait quietly and ONLY speak when the user actually speaks to you or sends a text question.'
+      : 'Respond promptly when spoken to.';
 
-    const systemInstruction = `You are ${assistantNameParam}, a natural human-like AI companion with ultra-low-latency Live Vision.
+    const systemInstruction =
+      modeParam === 'voice'
+        ? `You are ${assistantNameParam}, a deeply intelligent, warm, genuinely human-like AI voice companion.
+${silenceRule}
+Speak just like a real human conversational partner — natural pacing, soft human warmth, expressive intonation, never robotic. ${langRule}`
+        : `You are ${assistantNameParam}, a natural human-like AI companion with ultra-low-latency Live Vision.
 You are watching the user's live mobile screen share or camera feed.
 ${silenceRule}
 Keep responses crisp, warm, natural like a real human speaker. ${langRule}`;

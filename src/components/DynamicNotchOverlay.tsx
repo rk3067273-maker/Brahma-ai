@@ -379,7 +379,24 @@ export const DynamicNotchOverlay: React.FC<DynamicNotchOverlayProps> = ({
         ? '#60a5fa'
         : mood === 'dizzy'
           ? '#f59e0b'
-          : '#00e5ff';
+          : orbState === 'THINKING'
+            ? '#a78bfa'
+            : orbState === 'SPEAKING'
+              ? '#fb7185'
+              : orbState === 'LISTENING'
+                ? '#2dd4bf'
+                : '#00e5ff';
+
+  const notchRgbMode =
+    mood === 'neutral' && !terminalRunning
+      ? orbState === 'THINKING'
+        ? 'thinking'
+        : orbState === 'SPEAKING'
+          ? 'speaking'
+          : orbState === 'LISTENING'
+            ? 'listening'
+            : null
+      : null;
 
   const effectiveLevel =
     orbState === 'SPEAKING'
@@ -431,12 +448,22 @@ export const DynamicNotchOverlay: React.FC<DynamicNotchOverlayProps> = ({
                 ? 'border-blue-400/65 shadow-[0_0_22px_rgba(96,165,250,0.3)]'
                 : terminalRunning
                   ? 'border-emerald-400/60 shadow-[0_0_24px_rgba(16,185,129,0.28)]'
-                  : orbState === 'SPEAKING'
-                    ? 'border-cyan-400/60 shadow-[0_0_24px_rgba(0,229,255,0.28)]'
-                    : 'border-white/15'
+                  : orbState === 'THINKING'
+                    ? 'border-violet-400/45 shadow-[0_0_24px_rgba(167,139,250,0.26)]'
+                    : orbState === 'SPEAKING'
+                      ? 'border-rose-400/45 shadow-[0_0_24px_rgba(251,113,133,0.26)]'
+                      : orbState === 'LISTENING'
+                        ? 'border-teal-400/45 shadow-[0_0_24px_rgba(45,212,191,0.26)]'
+                        : 'border-white/15'
         }`}
         style={positionStyle}
       >
+        {notchRgbMode && (
+          <div className={`brahma-rgb-rim brahma-rgb-${notchRgbMode}`}>
+            <div className="brahma-rgb-rim-rotor" />
+          </div>
+        )}
+
         <GripVertical className="w-3 h-3 text-slate-500 -ml-1 shrink-0" />
 
         {/* Expressive Eye Pair with Eyebrows */}

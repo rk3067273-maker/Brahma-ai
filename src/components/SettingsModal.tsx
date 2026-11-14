@@ -1,13 +1,10 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import {
   X,
-  KeyRound,
   ShieldCheck,
   Sliders,
   CheckCircle2,
   AlertTriangle,
-  Eye,
-  EyeOff,
   Mic,
   Camera,
   Accessibility,
@@ -35,7 +32,6 @@ import {
   loadBrahmaSettings,
   requestPermissionByKey,
   saveBrahmaSettings,
-  verifyGeminiApiKey,
   verifyServerConnection,
   type AndroidPermissionStatus,
   type BrahmaSettings,
@@ -59,24 +55,34 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 }) => {
   const [subTab, setSubTab] = useState<'api' | 'permissions' | 'notch'>(initialTab);
   const [settings, setSettings] = useState<BrahmaSettings>(() => loadBrahmaSettings());
-  const [showKey, setShowKey] = useState(false);
-
-  const [verifyingKey, setVerifyingKey] = useState(false);
-  const [keyStatus, setKeyStatus] = useState<{ ok: boolean; msg: string } | null>(null);
 
   const [testingServer, setTestingServer] = useState(false);
-  const [serverStatus, setServerStatus] = useState<{ ok: boolean; msg: string } | null>(null);
+  const [serverStatus, setServerStatus] = useState<{ ok: boolean; geminiConfigured: boolean; msg: string } | null>(null);
 
   const [perms, setPerms] = useState<AndroidPermissionStatus | null>(null);
   const [refreshingPerms, setRefreshingPerms] = useState(false);
   const [savedNotice, setSavedNotice] = useState<string | null>(null);
 
+  const checkServerStatus = useCallback(async (urlOverride?: string) => {
+    setTestingServer(true);
+    try {
+      const res = await verifyServerConnection(urlOverride);
+      setServerStatus({ ok: res.ok, geminiConfigured: res.geminiConfigured, msg: res.message });
+    } finally {
+      setTestingServer(false);
+    }
+  }, []);
+
   useEffect(() => {
     if (open) {
       setSubTab(initialTab);
-      setSettings(loadBrahmaSettings());
+      const current = loadBrahmaSettings();
+      setSettings(current);
+      if (initialTab === 'api') {
+        void checkServerStatus(current.serverUrl);
+      }
     }
-  }, [initialTab, open]);
+  }, [initialTab, open, checkServerStatus]);
 
   const refreshPermissions = useCallback(async () => {
     setRefreshingPerms(true);
@@ -129,35 +135,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     window.setTimeout(() => setSavedNotice(null), 2600);
   };
 
-  const handleSaveAndVerifyKey = async () => {
-    const updated = saveBrahmaSettings(settings);
-    onSettingsChanged(updated);
-    setVerifyingKey(true);
-    setKeyStatus(null);
-    try {
-      const res = await verifyGeminiApiKey(settings.geminiApiKey);
-      if (res.ok) {
-        const refreshed = loadBrahmaSettings();
-        setSettings(refreshed);
-        onSettingsChanged(refreshed);
-      }
-      setKeyStatus({ ok: res.ok, msg: res.message });
-    } finally {
-      setVerifyingKey(false);
-    }
-  };
-
   const handleTestServer = async () => {
     const updated = saveBrahmaSettings(settings);
     onSettingsChanged(updated);
-    setTestingServer(true);
-    setServerStatus(null);
-    try {
-      const res = await verifyServerConnection(settings.serverUrl);
-      setServerStatus({ ok: res.ok, msg: res.message });
-    } finally {
-      setTestingServer(false);
-    }
+    await checkServerStatus(settings.serverUrl);
   };
 
   const handleRequestPerm = async (key: string) => {
@@ -266,7 +247,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               <span>Brahma Evo Settings & Permissions</span>
             </h2>
             <p className="text-[11px] text-slate-400">
-              API Key ভেরিফিকেশন, Android অ্যাক্সেসিবিলিটি পারমিশন ও ডাইনামিক নচ কন্ট্রোল
+              সার্ভার কানেকশন, Android অ্যাক্সেসিবিলিটি পারমিশন ও ডাইনামিক নচ কন্ট্রোল
             </p>
           </div>
           <button
@@ -283,15 +264,18 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         <div className="px-3 py-2 bg-[#090c12] border-b border-white/10 flex gap-1.5 overflow-x-auto">
           <button
             type="button"
-            onClick={() => setSubTab('api')}
+            onClick={() => {
+              setSubTab('api');
+              void checkServerStatus(settings.serverUrl);
+            }}
             className={`px-3 py-2 rounded-xl text-xs font-bold inline-flex items-center gap-1.5 whitespace-nowrap border transition cursor-pointer ${
               subTab === 'api'
                 ? 'bg-cyan-500/20 border-cyan-400 text-cyan-200'
                 : 'bg-white/5 border-transparent text-slate-400 hover:text-white'
             }`}
           >
-            <KeyRound className="w-3.5 h-3.5" />
-            <span>API Key ও কানেকশন</span>
+            <Server className="w-3.5 h-3.5" />
+            <span>নাম ও সার্ভার সংযোগ</span>
           </button>
 
           <button
@@ -364,76 +348,14 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 </div>
               </div>
 
-              {/* Gemini API Key Card */}
-              <div className="p-4 rounded-2xl bg-[#0d111a] border border-cyan-500/30 space-y-3">
-                <div className="flex items-center justify-between gap-2">
-                  <div className="flex items-center gap-2 text-xs font-bold text-white uppercase tracking-wider">
-                    <KeyRound className="w-4 h-4 text-cyan-400" />
-                    <span>Gemini API Key (Latest Gemini 4 & 3.8 API)</span>
-                  </div>
-                  {settings.geminiApiKey.trim() && (
-                    <span className="text-[10px] px-2 py-0.5 rounded-full bg-cyan-500/15 text-cyan-300 border border-cyan-400/30 font-mono">
-                      {settings.verifiedModel || 'gemini-4-hydrogen'}
-                    </span>
-                  )}
-                </div>
-                <p className="text-xs text-slate-400 leading-relaxed">
-                  Android APK-তে সরাসরি লেটেস্ট Google Gemini API (Gemini 4 Hydrogen, Gemini 3.8 Neural Voice ও Live Vision) চালাতে আপনার API Key দিয়ে <strong>Save & Verify</strong> করুন।
-                </p>
-
-                <div className="flex gap-2">
-                  <div className="relative flex-1">
-                    <input
-                      type={showKey ? 'text' : 'password'}
-                      value={settings.geminiApiKey}
-                      onChange={(e) => updateField('geminiApiKey', e.target.value)}
-                      placeholder="AIzaSy... (আপনার Gemini API Key দিন)"
-                      className="w-full bg-[#06080c] border border-white/15 focus:border-cyan-400 rounded-xl pl-3.5 pr-9 py-2.5 text-xs font-mono text-white focus:outline-none"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => setShowKey((s) => !s)}
-                      className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white cursor-pointer"
-                    >
-                      {showKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                    </button>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => void handleSaveAndVerifyKey()}
-                    disabled={verifyingKey}
-                    className="px-4 py-2.5 rounded-xl bg-cyan-400 hover:bg-cyan-300 disabled:opacity-50 text-[#020305] font-bold text-xs whitespace-nowrap cursor-pointer"
-                  >
-                    {verifyingKey ? 'Checking...' : 'Save & Verify'}
-                  </button>
-                </div>
-
-                {keyStatus && (
-                  <div
-                    className={`p-2.5 rounded-xl text-xs flex items-start gap-2 border ${
-                      keyStatus.ok
-                        ? 'bg-emerald-500/10 border-emerald-400/40 text-emerald-200'
-                        : 'bg-rose-500/10 border-rose-400/40 text-rose-200'
-                    }`}
-                  >
-                    {keyStatus.ok ? (
-                      <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
-                    ) : (
-                      <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
-                    )}
-                    <span>{keyStatus.msg}</span>
-                  </div>
-                )}
-              </div>
-
-              {/* Optional Server Backend URL */}
+              {/* Optional Server Backend URL (for Standalone Android APK) */}
               <div className="p-4 rounded-2xl bg-[#0d111a] border border-white/10 space-y-3">
                 <div className="flex items-center gap-2 text-xs font-bold text-white uppercase tracking-wider">
                   <Server className="w-4 h-4 text-emerald-400" />
-                  <span>Backend Server URL (ঐচ্ছিক — Live WS ও Remote Sync)</span>
+                  <span>Backend Server URL (Android APK রিমোট সিঙ্ক)</span>
                 </div>
                 <p className="text-xs text-slate-400">
-                  আপনার ক্লাউড সার্ভার বা লোকাল পিসির URL দিলে অ্যাপটি সরাসরি ফুল সার্ভার মোডেও কানেক্ট হবে (ফাঁকা রাখলে ফোনে সরাসরি Gemini Key দিয়েই চলবে)।
+                  ওয়েবে ব্যবহার করলে এটি ফাঁকা রাখুন। শুধুমাত্র Android APK থেকে আপনার হোস্ট করা ব্রহ্মা সার্ভারে যুক্ত হতে হলে নিচে সার্ভার URL দিন।
                 </p>
                 <div className="flex gap-2">
                   <input
@@ -452,15 +374,21 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     {testingServer ? 'Testing...' : 'Verify Server'}
                   </button>
                 </div>
+
                 {serverStatus && (
                   <div
-                    className={`p-2.5 rounded-xl text-xs border ${
-                      serverStatus.ok
+                    className={`p-2.5 rounded-xl text-xs flex items-start gap-2 border ${
+                      serverStatus.ok && serverStatus.geminiConfigured
                         ? 'bg-emerald-500/10 border-emerald-400/40 text-emerald-200'
                         : 'bg-amber-500/10 border-amber-400/40 text-amber-200'
                     }`}
                   >
-                    {serverStatus.msg}
+                    {serverStatus.ok && serverStatus.geminiConfigured ? (
+                      <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+                    ) : (
+                      <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                    )}
+                    <span>{serverStatus.msg}</span>
                   </div>
                 )}
               </div>

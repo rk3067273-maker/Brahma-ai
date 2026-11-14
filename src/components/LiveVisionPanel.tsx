@@ -327,7 +327,7 @@ export const LiveVisionPanel: React.FC<LiveVisionPanelProps> = ({
         return;
       }
 
-      setStatusNote('Android Standalone Live Vision চালু (On-Device Gemini Frame Stream)');
+      setStatusNote('Android ক্যামেরা প্রিভিউ চালু — লাইভ AI ভিশনের জন্য Settings থেকে Server URL সংযোগ করুন');
 
       frameIntervalRef.current = window.setInterval(() => {
         const video = videoRef.current;

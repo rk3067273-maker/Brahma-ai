@@ -91,7 +91,39 @@ export default function App() {
   });
 
   const currentAudioRef = useRef<HTMLAudioElement | null>(null);
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const audioSourceRef = useRef<AudioBufferSourceNode | null>(null);
   const levelIntervalRef = useRef<number>(0);
+
+  const unlockAudioPlayback = useCallback(() => {
+    try {
+      const AudioCtx =
+        window.AudioContext ||
+        (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+      if (!AudioCtx) return null;
+      if (!audioCtxRef.current || audioCtxRef.current.state === 'closed') {
+        audioCtxRef.current = new AudioCtx();
+      }
+      if (audioCtxRef.current.state === 'suspended') {
+        void audioCtxRef.current.resume().catch(() => {});
+      }
+      return audioCtxRef.current;
+    } catch {
+      return null;
+    }
+  }, []);
+
+  useEffect(() => {
+    const onGesture = () => {
+      unlockAudioPlayback();
+    };
+    window.addEventListener('pointerdown', onGesture, { passive: true });
+    window.addEventListener('keydown', onGesture, { passive: true });
+    return () => {
+      window.removeEventListener('pointerdown', onGesture);
+      window.removeEventListener('keydown', onGesture);
+    };
+  }, [unlockAudioPlayback]);
 
   const refreshTerminalState = useCallback(() => {
     brahmaFetch('/api/terminal/state')
@@ -182,6 +214,16 @@ export default function App() {
 
   const stopSpeaking = useCallback(() => {
     window.clearInterval(levelIntervalRef.current);
+    if (audioSourceRef.current) {
+      try {
+        audioSourceRef.current.onended = null;
+        audioSourceRef.current.stop();
+        audioSourceRef.current.disconnect();
+      } catch {
+        // ignore
+      }
+      audioSourceRef.current = null;
+    }
     if (currentAudioRef.current) {
       currentAudioRef.current.pause();
       currentAudioRef.current.src = '';
@@ -225,28 +267,44 @@ export default function App() {
 
       if (window.speechSynthesis) {
         await new Promise<void>((resolve) => {
-          const u = new SpeechSynthesisUtterance(clean);
-          u.lang = langTag;
-          u.pitch = pitch;
-          u.rate = rate;
-          const voices = window.speechSynthesis.getVoices();
-          const langPrefix = langTag.split('-')[0].toLowerCase();
-          const matchingLangVoices = voices.filter((v) =>
-            v.lang.toLowerCase().startsWith(langPrefix)
+          let settled = false;
+          const finish = () => {
+            if (settled) return;
+            settled = true;
+            window.clearTimeout(guardId);
+            resolve();
+          };
+          const guardId = window.setTimeout(
+            finish,
+            Math.min(14000, Math.max(3200, clean.length * 140))
           );
-          if (matchingLangVoices.length > 0) {
-            const wantFemale = voiceOpt.gender === 'female';
-            const gendered = matchingLangVoices.find((v) => {
-              const n = v.name.toLowerCase();
-              return wantFemale
-                ? /female|woman|girl|lekha|kalpana|heera|swara|tanvi|aditi|raveena|priya|ananya/.test(n)
-                : /male|man|prabhat|madhur|hemant|rishi|bashkar|neel|arjun/.test(n);
-            });
-            u.voice = gendered || matchingLangVoices[0];
+
+          try {
+            const u = new SpeechSynthesisUtterance(clean);
+            u.lang = langTag;
+            u.pitch = pitch;
+            u.rate = rate;
+            const voices = window.speechSynthesis.getVoices();
+            const langPrefix = langTag.split('-')[0].toLowerCase();
+            const matchingLangVoices = voices.filter((v) =>
+              v.lang.toLowerCase().startsWith(langPrefix)
+            );
+            if (matchingLangVoices.length > 0) {
+              const wantFemale = voiceOpt.gender === 'female';
+              const gendered = matchingLangVoices.find((v) => {
+                const n = v.name.toLowerCase();
+                return wantFemale
+                  ? /female|woman|girl|lekha|kalpana|heera|swara|tanvi|aditi|raveena|priya|ananya/.test(n)
+                  : /male|man|prabhat|madhur|hemant|rishi|bashkar|neel|arjun/.test(n);
+              });
+              u.voice = gendered || matchingLangVoices[0];
+            }
+            u.onend = finish;
+            u.onerror = finish;
+            window.speechSynthesis.speak(u);
+          } catch {
+            finish();
           }
-          u.onend = () => resolve();
-          u.onerror = () => resolve();
-          window.speechSynthesis.speak(u);
         });
       }
 
@@ -273,6 +331,8 @@ export default function App() {
         return;
       }
 
+      const ctx = unlockAudioPlayback();
+
       try {
         const res = await brahmaFetch('/api/tts', {
           method: 'POST',
@@ -283,10 +343,65 @@ export default function App() {
             languageMode,
           }),
         });
-        const data = await res.json();
+        const raw = await res.text();
+        let data: { useNativeTts?: boolean; audioBase64?: string; mimeType?: string } = {};
+        try {
+          data = raw ? (JSON.parse(raw) as typeof data) : {};
+        } catch {
+          data = {};
+        }
         if (data.useNativeTts || !res.ok || !data.audioBase64) {
           await speakWithDeviceTts(clean, onStart, onEnd, onLevel);
           return;
+        }
+
+        // Primary: Play Gemini 3.8 WAV via unlocked Web AudioContext (bypasses async HTMLAudio blocks on Android Chrome)
+        if (ctx) {
+          try {
+            if (ctx.state === 'suspended') {
+              await ctx.resume();
+            }
+            const bin = atob(data.audioBase64);
+            const bytes = new Uint8Array(bin.length);
+            for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+            const audioBuffer = await ctx.decodeAudioData(bytes.buffer.slice(0));
+
+            const source = ctx.createBufferSource();
+            source.buffer = audioBuffer;
+            const analyser = ctx.createAnalyser();
+            analyser.fftSize = 128;
+            source.connect(analyser);
+            analyser.connect(ctx.destination);
+            audioSourceRef.current = source;
+
+            const freqData = new Uint8Array(analyser.frequencyBinCount);
+            setOrbState('SPEAKING');
+            onStart?.();
+            levelIntervalRef.current = window.setInterval(() => {
+              analyser.getByteFrequencyData(freqData);
+              let sum = 0;
+              for (let i = 0; i < freqData.length; i++) sum += freqData[i];
+              const lvl = Math.min(1, Math.max(0.18, sum / freqData.length / 135));
+              setVoiceLevel(lvl);
+              onLevel?.(lvl);
+            }, 60);
+
+            await new Promise<void>((resolve) => {
+              source.onended = () => {
+                window.clearInterval(levelIntervalRef.current);
+                audioSourceRef.current = null;
+                setVoiceLevel(0.05);
+                onLevel?.(0.05);
+                setOrbState('ONLINE');
+                onEnd?.();
+                resolve();
+              };
+              source.start(0);
+            });
+            return;
+          } catch {
+            // fall through to HTMLAudio element fallback
+          }
         }
 
         const audio = new Audio(`data:${data.mimeType || 'audio/wav'};base64,${data.audioBase64}`);
@@ -328,7 +443,7 @@ export default function App() {
         await speakWithDeviceTts(clean, onStart, onEnd, onLevel);
       }
     },
-    [languageMode, speakWithDeviceTts, stopSpeaking, voiceProfile]
+    [languageMode, speakWithDeviceTts, stopSpeaking, unlockAudioPlayback, voiceProfile]
   );
 
   const handleSendMessage = useCallback(
@@ -338,6 +453,7 @@ export default function App() {
       imageMimeType?: string,
       skipAutoSpeak = false
     ): Promise<string> => {
+      unlockAudioPlayback();
       const userMsg: ChatMessage = {
         id: `u-${Date.now()}`,
         role: 'user',
@@ -362,10 +478,27 @@ export default function App() {
             history: messages.slice(-8).map((m) => ({ role: m.role, text: m.text })),
           }),
         });
-        const data = await res.json();
+        const rawBody = await res.text();
+        let data: {
+          reply?: string;
+          error?: string;
+          popupAction?: 'show' | 'hide';
+          moduleToOpen?: string;
+          toolPayload?: unknown;
+          automationExecuted?: ChatMessage['automationExecuted'];
+          intent?: string;
+          orbState?: string;
+          tier?: number;
+          latencyMs?: number;
+        } = {};
+        try {
+          data = rawBody ? (JSON.parse(rawBody) as typeof data) : {};
+        } catch {
+          data = { error: `Server returned HTTP ${res.status}` };
+        }
         const replyText = res.ok
-          ? String(data.reply || 'নির্দেশ সম্পন্ন হয়েছে।')
-          : String(data.error || 'Brahma Core encountered an error.');
+          ? String(data.reply || 'উত্তর পাওয়া যায়নি। অনুগ্রহ করে আবার চেষ্টা করুন।')
+          : String(data.error || `Brahma Core returned HTTP ${res.status}`);
 
         if (res.ok) {
           if (data.popupAction === 'show') {
@@ -428,7 +561,7 @@ export default function App() {
         setIsThinking(false);
       }
     },
-    [appSettings.assistantName, autoSpeakReply, languageMode, messages, refreshBriefing, refreshTerminalState, speakDeepVoice]
+    [appSettings.assistantName, autoSpeakReply, languageMode, messages, refreshBriefing, refreshTerminalState, speakDeepVoice, unlockAudioPlayback]
   );
 
   return (
@@ -461,21 +594,17 @@ export default function App() {
       <div className="shrink-0 h-11 bg-[#020305]" />
 
       {/* Top Android Companion Header */}
-      <header className="shrink-0 h-14 px-3 sm:px-4 bg-[#07080b]/95 border-b border-cyan-500/20 flex items-center justify-between gap-2 z-30">
-        <div className="flex items-center gap-2 shrink-0">
+      <header className="shrink-0 h-14 px-3 sm:px-5 bg-[#070a10] border-b border-white/10 flex items-center justify-between gap-4 z-30">
+        <div className="flex items-center gap-2.5 shrink-0">
           <img
             src="/brahma-assets/brahma_evo_logo.png"
             alt={appSettings.assistantName || 'Brahma AI'}
-            className="w-8 h-8 rounded-lg object-contain border border-cyan-500/30 bg-[#0d0f14] p-0.5"
+            referrerPolicy="no-referrer"
+            className="w-8 h-8 rounded-lg object-contain border border-white/15 bg-[#0d121c] p-0.5 shrink-0"
           />
-          <div>
-            <div className="text-xs sm:text-sm font-extrabold tracking-widest uppercase text-white leading-none">
-              {appSettings.assistantName || 'ব্রহ্মা AI'}
-            </div>
-            <div className="text-[9px] text-emerald-400 tracking-wider uppercase mt-0.5 font-semibold">
-              Android Edition
-            </div>
-          </div>
+          <span className="text-sm font-bold tracking-tight text-white whitespace-nowrap shrink-0">
+            {appSettings.assistantName || 'ব্রহ্মা AI'}
+          </span>
         </div>
 
         {/* Desktop / Tablet Top Nav */}
@@ -488,10 +617,10 @@ export default function App() {
                 key={item.id}
                 type="button"
                 onClick={() => setActiveTab(item.id)}
-                className={`px-2.5 py-1.5 rounded-lg text-xs font-medium inline-flex items-center gap-1.5 whitespace-nowrap border transition cursor-pointer ${
+                className={`px-2.5 py-1.5 rounded-lg text-xs font-medium inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 transition cursor-pointer ${
                   active
-                    ? 'bg-cyan-500/15 border-cyan-400/60 text-cyan-200 shadow-[0_0_16px_rgba(0,229,255,0.15)]'
-                    : 'bg-transparent border-transparent text-slate-400 hover:text-white hover:bg-white/5'
+                    ? 'bg-cyan-500/15 text-cyan-200 border border-cyan-400/40'
+                    : 'bg-transparent border border-transparent text-slate-400 hover:text-white hover:bg-white/5'
                 }`}
               >
                 <Icon className={`w-3.5 h-3.5 ${active ? 'text-cyan-400' : ''}`} />
@@ -501,7 +630,7 @@ export default function App() {
           })}
         </nav>
 
-        <div className="flex items-center gap-1.5 shrink-0">
+        <div className="flex items-center gap-2 shrink-0">
           <PWAInstallButton />
 
           <button
@@ -510,27 +639,12 @@ export default function App() {
               setSettingsInitialTab('api');
               setSettingsOpen(true);
             }}
-            title="Settings, API Keys & Android Permissions"
-            className="px-2.5 py-1.5 rounded-xl bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-400/40 text-cyan-200 text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer"
+            title="Settings, Server & Android Permissions"
+            className="px-3 py-1.5 rounded-lg bg-cyan-400 hover:bg-cyan-300 text-[#020305] text-xs font-bold inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 transition cursor-pointer"
           >
-            <Settings className="w-3.5 h-3.5 text-cyan-300" />
+            <Settings className="w-3.5 h-3.5" />
             <span className="hidden sm:inline">Settings</span>
           </button>
-
-          <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-[#0d0f14] border border-cyan-500/25">
-            <span
-              className={`w-2 h-2 rounded-full ${
-                orbState === 'THINKING'
-                  ? 'bg-amber-400 animate-pulse'
-                  : orbState === 'SPEAKING'
-                    ? 'bg-rose-400 animate-ping'
-                    : orbState === 'EXECUTING'
-                      ? 'bg-emerald-400 animate-ping'
-                      : 'bg-cyan-400'
-              }`}
-            />
-            <span className="text-[10px] font-mono tracking-wider text-cyan-200">{orbState}</span>
-          </div>
         </div>
       </header>
 
@@ -541,6 +655,7 @@ export default function App() {
             assistantName={appSettings.assistantName}
             orbState={orbState}
             setOrbState={setOrbState}
+            voiceLevel={voiceLevel}
             messages={messages}
             onSendMessage={async (text, img, mime) => {
               await handleSendMessage(text, img, mime, false);
@@ -570,6 +685,7 @@ export default function App() {
             onSpeakDeepVoice={speakDeepVoice}
             onStopSpeaking={stopSpeaking}
             onVoiceLevel={setVoiceLevel}
+            onOrbStateChange={setOrbState}
           />
         )}
 
